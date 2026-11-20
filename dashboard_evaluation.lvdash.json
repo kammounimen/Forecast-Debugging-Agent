@@ -1,0 +1,479 @@
+{
+  "datasets": [
+    {
+      "name": "c3207456",
+      "displayName": "exactitude",
+      "queryLines": [
+        "SELECT CASE WHEN a.config LIKE 'multi%' THEN '3 agents' ELSE 'Agent unique' END AS config,\r\n",
+        "       CASE WHEN a.config LIKE 'multi%' THEN '3 agents - passe 1'\r\n",
+        "            WHEN a.batch_id LIKE '20261118_205533%' THEN 'Agent unique - run préliminaire'\r\n",
+        "            ELSE CONCAT('Agent unique - passe ', a.run) END AS execution,\r\n",
+        "       a.batch_id, a.run,\r\n",
+        "       COUNT(*) AS n_cases,\r\n",
+        "       SUM(CASE WHEN a.predicted = k.expected_root_cause THEN 1 ELSE 0 END) AS n_correct,\r\n",
+        "       ROUND(100.0 * SUM(CASE WHEN a.predicted = k.expected_root_cause THEN 1 ELSE 0 END) / COUNT(*), 1) AS accuracy_pct\r\n",
+        "FROM workspace.forecast_debug.agent_runs_v2 a\r\n",
+        "JOIN workspace.forecast_debug.known_issues k ON a.case_id = k.case_id\r\n",
+        "WHERE a.batch_id <> '20261118_205533_6ebf80'\r\n",
+        "GROUP BY 1, 2, a.batch_id, a.run\r\n",
+        "ORDER BY a.batch_id, a.run"
+      ]
+    },
+    {
+      "name": "4e5df52e",
+      "displayName": "par_cas",
+      "queryLines": [
+        "-- 2. Résultat par cas (repérer les erreurs et l'instabilité)\r\n",
+        "SELECT a.case_id, k.expected_root_cause AS attendu, a.config, a.run,\r\n",
+        "       a.predicted AS predit, a.confidence,\r\n",
+        "       a.predicted = k.expected_root_cause AS correct\r\n",
+        "FROM workspace.forecast_debug.agent_runs_v2 a\r\n",
+        "JOIN workspace.forecast_debug.known_issues k ON a.case_id = k.case_id\r\n",
+        "WHERE a.batch_id <> '20261118_205533_6ebf80'\r\n",
+        "ORDER BY a.case_id, a.config, a.run;\r\n"
+      ]
+    },
+    {
+      "name": "20bbe2e5",
+      "displayName": "cout",
+      "queryLines": [
+        "SELECT CASE WHEN config LIKE 'multi%' THEN '3 agents' ELSE 'Agent unique' END AS config,\r\n",
+        "       ROUND(AVG(n_llm), 1) AS appels_llm_moyens,\r\n",
+        "       ROUND(AVG(seconds), 1) AS secondes_moyennes,\r\n",
+        "       SUM(CASE WHEN repaired THEN 1 ELSE 0 END) AS relances_de_format\r\n",
+        "FROM workspace.forecast_debug.agent_runs_v2\r\n",
+        "WHERE batch_id <> '20261118_205533_6ebf80'\r\n",
+        "GROUP BY 1"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "a53e8c6b",
+      "displayName": "Évaluation",
+      "layout": [
+        {
+          "widget": {
+            "name": "exactitude-cause-principale-execution",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "c3207456",
+                  "fields": [
+                    {
+                      "name": "config",
+                      "expression": "`config`"
+                    },
+                    {
+                      "name": "execution",
+                      "expression": "`execution`"
+                    },
+                    {
+                      "name": "accuracy_pct",
+                      "expression": "`accuracy_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Exactitude de la cause principale par exécution",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "execution",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "accuracy_pct",
+                  "scale": {
+                    "type": "quantitative",
+                    "domain": {
+                      "max": 100,
+                      "min": 0,
+                      "type": "custom"
+                    }
+                  }
+                },
+                "color": {
+                  "fieldName": "config",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "color": "#FF8C00",
+                        "value": "Agent unique"
+                      },
+                      {
+                        "color": "#1E88E5",
+                        "value": "3 agents"
+                      }
+                    ]
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "exactitude-moyenne-par-config",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "c3207456",
+                  "fields": [
+                    {
+                      "name": "config",
+                      "expression": "`config`"
+                    },
+                    {
+                      "name": "avg(accuracy_pct)",
+                      "expression": "AVG(`accuracy_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Exactitude moyenne par configuration",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "config",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "avg(accuracy_pct)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "config",
+                  "scale": {
+                    "mappings": [
+                      {
+                        "color": "#1F77B4",
+                        "value": "3 agents"
+                      },
+                      {
+                        "color": "#FF7F0E",
+                        "value": "Agent unique"
+                      }
+                    ],
+                    "type": "categorical"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "27652749",
+            "spec": {
+              "widgetType": "text",
+              "version": 1,
+              "encodings": {
+                "text": {
+                  "lines": [
+                    "<span style=\"text-align:center;display:block\"><span style=\"font-size: 30px;color: #077A9D;\">Données synthétiques, 12 cas. Résultats non généralisables. 3 agents : 1 passe. Agent unique : 3 passes.</span></span>"
+                  ],
+                  "fields": []
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "resultat-par-cas",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "4e5df52e",
+                  "fields": [
+                    {
+                      "name": "case_id",
+                      "expression": "`case_id`"
+                    },
+                    {
+                      "name": "attendu",
+                      "expression": "`attendu`"
+                    },
+                    {
+                      "name": "predit",
+                      "expression": "`predit`"
+                    },
+                    {
+                      "name": "config",
+                      "expression": "`config`"
+                    },
+                    {
+                      "name": "run",
+                      "expression": "`run`"
+                    },
+                    {
+                      "name": "correct",
+                      "expression": "`correct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Résultat par cas",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "case_id"
+                  },
+                  {
+                    "fieldName": "attendu"
+                  },
+                  {
+                    "fieldName": "predit"
+                  },
+                  {
+                    "fieldName": "config"
+                  },
+                  {
+                    "fieldName": "run"
+                  },
+                  {
+                    "fieldName": "correct"
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 8,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "appels-llm-par-config",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "20bbe2e5",
+                  "fields": [
+                    {
+                      "name": "config",
+                      "expression": "`config`"
+                    },
+                    {
+                      "name": "appels_llm_moyens",
+                      "expression": "`appels_llm_moyens`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Appels LLM moyens par configuration",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "config",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "appels_llm_moyens",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "config",
+                  "scale": {
+                    "mappings": [
+                      {
+                        "color": "#1E88E5",
+                        "value": "3 agents"
+                      },
+                      {
+                        "color": "#FF8C00",
+                        "value": "Agent unique"
+                      }
+                    ],
+                    "type": "categorical"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "secondes-par-config",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "20bbe2e5",
+                  "fields": [
+                    {
+                      "name": "config",
+                      "expression": "`config`"
+                    },
+                    {
+                      "name": "secondes_moyennes",
+                      "expression": "`secondes_moyennes`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Secondes moyennes par configuration",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "config",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "secondes_moyennes",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "config",
+                  "scale": {
+                    "mappings": [
+                      {
+                        "color": "#1F77B4",
+                        "value": "3 agents"
+                      },
+                      {
+                        "color": "#FF7F0E",
+                        "value": "Agent unique"
+                      }
+                    ],
+                    "type": "categorical"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 14,
+            "width": 6,
+            "height": 6
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}
