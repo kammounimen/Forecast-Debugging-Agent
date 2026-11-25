@@ -1,12 +1,13 @@
 # Forecast Debugging Agent
 
-**Système multi-agents basé sur les LLM et le RAG pour analyser et expliquer les écarts entre les prévisions Batch et Real-Time.**
+**Système multi-agents basé sur les LLM et le RAG pour analyser et expliquer les écarts entre les prévisions Batch et Real-Time, avec une application web de restitution.**
 
 Auteures : Imen Kammoun et Mariam Kbaier
 Plateforme : Databricks Free Edition (compute serverless) | Langage : Python, SQL, PySpark
-LLM : `databricks-gpt-oss-120b` (endpoint Databricks, aucune clé externe) | Orchestration : LangGraph
+LLM : `databricks-gpt-oss-120b` (endpoint Databricks, aucune clé externe) | Orchestration : LangGraph | Application : Streamlit sur Databricks Apps
 
 > Résultats détaillés, analyse d'erreurs, coût et limites : voir **[RAPPORT_EVALUATION.md](RAPPORT_EVALUATION.md)**.
+> Prototype non commercial, données **synthétiques**. L'analyse est produite par des agents LLM et peut être inexacte.
 
 ---
 
@@ -19,11 +20,13 @@ LLM : `databricks-gpt-oss-120b` (endpoint Databricks, aucune clé externe) | Orc
 5. [Les données](#5-les-données)
 6. [Ce qui a été réalisé, étape par étape](#6-ce-qui-a-été-réalisé-étape-par-étape)
 7. [Résultats](#7-résultats)
-8. [Comment reproduire](#8-comment-reproduire)
-9. [Difficultés rencontrées et leçons](#9-difficultés-rencontrées-et-leçons)
-10. [Limites](#10-limites)
-11. [Ce qui reste à faire](#11-ce-qui-reste-à-faire)
-12. [Règles de travail](#12-règles-de-travail)
+8. [L'application web (Databricks Apps)](#8-lapplication-web-databricks-apps)
+9. [Comment reproduire](#9-comment-reproduire)
+10. [Démo de 5 minutes](#10-démo-de-5-minutes)
+11. [Difficultés rencontrées et leçons](#11-difficultés-rencontrées-et-leçons)
+12. [Limites](#12-limites)
+13. [Ce qui reste à faire](#13-ce-qui-reste-à-faire)
+14. [Règles de travail](#14-règles-de-travail)
 
 ---
 
@@ -34,9 +37,22 @@ Une entreprise produit deux types de prévisions de ventes :
 - **Batch** : calcul périodique à partir d'un *snapshot* de données figé.
 - **Real-Time** : calcul à la demande, avec des données potentiellement plus récentes.
 
-Quand les deux résultats diffèrent (exemple : 1 000 contre 1 350 unités), l'enquête manuelle est lente et dépend de l'expertise de quelques personnes.
+Quand les deux résultats diffèrent (exemple : 1 000 contre 1 350 unités), l'enquête manuelle est lente et dépend de l'expertise de quelques personnes : il faut comparer les snapshots, les variables d'entrée, les configurations et les logs, et connaître les règles de l'entreprise.
 
-**Objectif** : construire un système qui mène cette enquête automatiquement avec des outils en lecture seule, identifie la **cause racine**, fournit des **preuves**, un **niveau de confiance** et une **recommandation**.
+**Objectif** : construire un système qui mène cette enquête automatiquement avec des outils en lecture seule, identifie la **cause racine**, fournit des **preuves**, un **niveau de confiance** et une **recommandation**, puis présente le tout dans une application lisible par un humain.
+
+### Valeur apportée (et ce qui n'est pas démontré)
+
+| Apport | Comment le projet le fournit |
+|---|---|
+| Gain de temps | Environ 8 à 16 s par cas, 6 à 11 appels LLM |
+| Explications vérifiables | Chaque affirmation cite une source `tool:...` ou `doc:...`, contrôlée par le code |
+| Connaissance de l'entreprise | Le RAG retrouve les règles (24 h, 5 %), les incidents passés et le runbook |
+| Cause contre symptôme | CASE_009 : la différence de `sales_7d` est un symptôme de données obsolètes |
+| Pas de fausse alerte | CASE_007 : l'agent conclut `NO_ISSUE` malgré 6 h de décalage |
+| Sécurité par conception | Outils en lecture seule, liste blanche de tables, vérité terrain inaccessible |
+
+**Non démontré** : une meilleure exactitude que les règles simples (elles font 12/12 parce qu'elles ont été écrites en connaissant les cas), un avantage des 3 agents sur l'agent unique, des performances sur données réelles.
 
 ### Principe de conception
 
@@ -70,6 +86,10 @@ Question : "Pourquoi Batch et Real-Time diffèrent pour CASE_xxx ?"
                          |
    Rapport : cause principale, causes secondaires, preuves
    (affirmation + source), confiance, recommandation, vérification
+                         |
+              Table agent_runs_v2 (Delta)
+                         |
+        Application Streamlit (Databricks Apps) : relit et met en forme
 ```
 
 ### Les 3 agents
@@ -111,7 +131,7 @@ Question : "Pourquoi Batch et Real-Time diffèrent pour CASE_xxx ?"
 
 ## 3. État d'avancement
 
-| # | Étape | Notebook(s) | État |
+| # | Étape | Notebook(s) / fichier(s) | État |
 |---|---|---|---|
 | 1 | Environnement Databricks, schéma `forecast_debug`, volume `raw` | `00_setup` | Fait |
 | 2 | Dataset synthétique : 7 tables Delta | `00_load_data` | Fait |
@@ -124,9 +144,12 @@ Question : "Pourquoi Batch et Real-Time diffèrent pour CASE_xxx ?"
 | 9 | Connexion au LLM et tool calling | `06_llm_connection_test` | Fait |
 | 10 | Agent unique | `07_agent_single` | Fait : 88,9 % (3 passes) |
 | 11 | Système à 3 agents LangGraph | `08_multi_agent` | Fait : 91,7 % (1 passe) |
-| 12 | Dataset v2 plus difficile, découpage développement/test | à créer | **À faire** |
-| 13 | Rapport d'évaluation et analyse d'erreurs | `RAPPORT_EVALUATION.md` | Fait (à mettre à jour avec le dataset v2) |
-| 14 | Démo de 5 minutes | | **À faire** |
+| 12 | Rapport d'évaluation et analyse d'erreurs | `RAPPORT_EVALUATION.md` | Fait (à mettre à jour avec le dataset v2) |
+| 13 | Application web Streamlit sur Databricks Apps | `app/app.py`, `app/app.yaml`, `app/requirements.txt` | Fait : déployée, lit les résultats réels |
+| 14 | Thème visuel détaillé (comparaison Batch / Real-Time, jauges, déroulé) | `app/theme.py` | Écrit, **à valider dans l'application déployée** |
+| 15 | Tableau de bord d'évaluation (Databricks Dashboards) | requêtes SQL, section 8.7 | Proposé, à créer |
+| 16 | Dataset v2 plus difficile, découpage développement/test | à créer | **À faire** |
+| 17 | Démo de 5 minutes | section 10 | Script écrit, **à répéter** |
 
 ---
 
@@ -135,8 +158,15 @@ Question : "Pourquoi Batch et Real-Time diffèrent pour CASE_xxx ?"
 ```
 Forecast-Debugging-Agent/
 ├── README.md
+├── RAPPORT_EVALUATION.md
 ├── data/                          6 fichiers CSV du dataset
 ├── rag_docs/                      10 documents Markdown du RAG
+├── app/                           application web (Databricks Apps)
+│   ├── app.py                     interface Streamlit
+│   ├── theme.py                   CSS et composants visuels
+│   ├── app.yaml                   commande de démarrage et variables
+│   ├── requirements.txt           dépendances de l'application
+│   └── .streamlit/config.toml     thème de base (optionnel)
 └── notebooks/
     ├── 00_setup                         schéma et volume
     ├── 00_load_data                     CSV -> tables Delta (+ rag_documents)
@@ -156,7 +186,7 @@ Forecast-Debugging-Agent/
 
 Non exécuté : `05c_vector_search` (Databricks Vector Search) a été proposé mais n'a pas été lancé. `01_comparison_engine.scala` existe comme bonus pour un environnement qui supporte Scala, mais Scala n'est pas supporté sur la Free Edition, donc le chemin principal est PySpark.
 
-**Tous les notebooks doivent être dans le même dossier du workspace** : ils s'appellent entre eux avec `%run ./nom`.
+**Tous les notebooks doivent être dans le même dossier du workspace** : ils s'appellent entre eux avec `%run ./nom`. Les fichiers de l'application (`app/`) sont des **fichiers**, pas des notebooks.
 
 ---
 
@@ -192,7 +222,11 @@ Catalogue : `workspace`, schéma : `forecast_debug`, volume : `raw` (dossiers `d
 | Table | Contenu |
 |---|---|
 | `agent_runs` | Résultats de la **première version** de l'agent unique (10/12) |
-| `agent_runs_v2` | Résultats des runs de l'agent unique et du système à 3 agents : `batch_id`, `config`, `run`, `case_id`, `predicted`, `secondary`, `confidence`, outils appelés, nombre d'appels LLM, durée, relance, exactitude, réponse brute, sorties d'outils. La colonne `config` indique le système, la présence du RAG, la version du prompt et le modèle. |
+| `agent_runs_v2` | Résultats des runs de l'agent unique et du système à 3 agents. C'est la table lue par l'application. |
+
+Colonnes de `agent_runs_v2` utilisées par l'application : `batch_id`, `config` (système, RAG, version du prompt, modèle ; commence par `multi` pour les 3 agents), `run`, `case_id`, `predicted`, `secondary`, `confidence`, `tools`, `n_tools`, `n_llm`, `seconds`, `repaired`, `raw` (rapport JSON), `tool_outputs` (sorties des outils), `ts`.
+
+**Troncature** : le rapport `raw` est conservé sur 4 000 caractères au plus, et `tool_outputs` sur 12 000. Les gros passages du RAG, placés après les 5 outils de données, peuvent faire dépasser la limite : le JSON est alors coupé (voir 8.6).
 
 ### Les 12 cas
 
@@ -365,13 +399,129 @@ Sur 14 requêtes, **Dense et Hybride ont le même recall@3 mais échouent sur de
 
 ### 7.5 Sécurité et traçabilité vérifiées
 
-- Les agents n'ont jamais accès à `known_issues` : l'outil de lecture refuse la table, et seule la cellule d'évaluation la lit.
+- Les agents n'ont jamais accès à `known_issues` : l'outil de lecture refuse la table, et seule la cellule d'évaluation (et l'onglet « Évaluation et limites » de l'application) la lit.
 - Chaque rapport cite ses sources, et le code vérifie qu'elles existent.
 - Chaque run est sauvegardé dans `agent_runs_v2`, avec les sorties d'outils.
 
 ---
 
-## 8. Comment reproduire
+## 8. L'application web (Databricks Apps)
+
+L'application est un **tableau de restitution en lecture seule** : elle ne relance pas les agents. Les agents ont déjà tourné dans Databricks, et l'application relit leur analyse enregistrée dans `agent_runs_v2`, puis la met en forme. « Temps réel » signifie ici : la page relit la table (cache de 30 s) ; un cas prend 8 à 16 s à analyser, ce n'est pas du streaming.
+
+### 8.1 Ce que l'utilisateur voit
+
+| Onglet | Contenu |
+|---|---|
+| **Analyse** | Choix d'un cas ou de tout le lot, bouton « Lancer l'analyse », puis le rapport |
+| **Architecture** | Schéma des 3 agents, du RAG, de la vérification par le code et de l'unique révision |
+| **Évaluation et limites** | Exactitude et coût mesurés (comparaison à la vérité terrain), limites écrites sans détour |
+
+La barre latérale permet de choisir l'exécution (`batch_id`) et la passe, et d'actualiser les données.
+
+**Rapport d'un cas** : verdict (cause, confiance, résultat de la vérification), 4 compteurs (écart en unités, écart relatif, âge des snapshots Batch et Real-Time), graphique des deux prévisions, graphique de fraîcheur avec la limite de 24 h, chaîne d'explication (cause, faits observés, effet), tableau de ce qui diffère entre les deux pipelines, avertissement du pipeline Batch s'il existe, recommandation, preuves avec leurs sources, détail de la vérification par le code, et **export PDF**.
+
+**Rapport du lot** : compteurs (cas analysés, avec problème, confiance faible, vérification à revoir), répartition des causes, carte de décision (écart contre âge du snapshot, avec les seuils 5 % et 24 h), liste « à relire en priorité » (problèmes d'abord, puis confiance la plus faible), et PDF du lot.
+
+### 8.2 Détails de conception
+
+- **Source de vérité unique** : la table `agent_runs_v2`. La vérité terrain `known_issues` n'est utilisée que dans l'onglet d'évaluation, jamais à côté d'un cas.
+- **Mode démonstration** : sans `DATABRICKS_WAREHOUSE_ID`, l'application démarre avec 4 cas **fictifs** (`DEMO_01` à `DEMO_04`). Ne jamais les présenter comme des résultats réels.
+- **Sécurité** : tout texte écrit par le modèle est échappé avant affichage (`html.escape`), l'identifiant de lot est validé par expression régulière, et l'application n'exécute que des `SELECT`.
+- **Lecture tolérante** : si `tool_outputs` est tronqué, l'application récupère les paires `[outil, sortie]` complètes du début de la liste. Si une sortie manque, le panneau concerné affiche « Données non disponibles » et une ligne liste les outils absents ; la cause, les preuves et la recommandation restent affichées. La chaîne d'explication n'affirme jamais « aucune différence d'entrée » quand elle n'a pas les faits.
+- **PDF** : généré avec `reportlab`. Les traits d'union et espaces insécables spéciaux écrits par le modèle sont remplacés par des caractères simples, sinon la police standard affiche des « ? ».
+- **Thème** : `theme.py` contient le CSS et les composants visuels (en-tête Batch / Real-Time, cartes de comparaison, jauges avec repère sur la limite documentée, étiquettes « Outil » et « Document » sur les sources, déroulé de l'enquête en 4 étapes). Les noms de classes CSS sont ceux de `app.py`, donc le style s'applique sans réécrire l'interface.
+
+### 8.3 Fichiers
+
+| Fichier | Rôle |
+|---|---|
+| `app.py` | Interface, accès aux données, graphiques Altair, PDF |
+| `theme.py` | CSS et composants visuels. Doit être dans le même dossier que `app.py`. |
+| `app.yaml` | Commande de démarrage Streamlit ; lit l'ID du SQL warehouse depuis la ressource de clé `sql-warehouse` |
+| `requirements.txt` | Dépendances. Aucune version n'est figée : à épingler après un déploiement qui fonctionne. |
+| `.streamlit/config.toml` | Thème de base (optionnel ; si l'upload masque les dossiers cachés, l'ignorer) |
+
+### 8.4 Déploiement pas à pas
+
+1. **Vérifier les données.** Dans le SQL Editor :
+   ```sql
+   SELECT config, COUNT(*) AS n_lignes FROM workspace.forecast_debug.agent_runs_v2 GROUP BY config;
+   ```
+   Il faut au moins une ligne dont `config` commence par `multi` (sinon lancer `08_multi_agent` jusqu'au bout).
+2. **Préparer le dossier.** Dans Workspace, créer un dossier (ex. `forecast-debugging-app`) et y importer `app.py`, `theme.py`, `app.yaml`, `requirements.txt`. La colonne *Type* doit indiquer **File** pour chacun ; un `app.py` importé comme notebook ne peut pas être le point d'entrée.
+3. **Créer l'application.** Sélecteur d'applications (icône à neuf points), puis *Databricks Apps*, *Create app*, *Create a custom app*. Nom en minuscules, chiffres et tirets (il ne peut plus être changé). Laisser la politique d'usage serverless sur *None* et sauter l'étape du dépôt Git.
+4. **Ajouter la ressource SQL warehouse.** Dans Settings, *+ Add resource*, *SQL warehouse*, choisir le warehouse existant, permission **Can use**, clé exactement **`sql-warehouse`** (c'est la clé qu'`app.yaml` référence).
+5. **Déployer.** Quand le calcul est prêt (le bouton *Deploy* devient bleu), *Deploy*, choisir le dossier de l'étape 2. Le premier déploiement installe les bibliothèques et prend quelques minutes.
+6. **Donner les droits de lecture au service principal.** Il est affiché dans l'onglet *Authorization* de l'application. Dans le SQL Editor, avec son nom ou son identifiant d'application entre accents graves :
+   ```sql
+   GRANT USE CATALOG ON CATALOG workspace TO `<service_principal>`;
+   GRANT USE SCHEMA ON SCHEMA workspace.forecast_debug TO `<service_principal>`;
+   GRANT SELECT ON TABLE workspace.forecast_debug.agent_runs_v2 TO `<service_principal>`;
+   GRANT SELECT ON TABLE workspace.forecast_debug.known_issues TO `<service_principal>`;
+   ```
+   Vérifier avec `SHOW GRANTS ON TABLE workspace.forecast_debug.agent_runs_v2;` et `SHOW GRANTS ON CATALOG workspace;`. Dans ce projet, Unity Catalog a accepté l'**identifiant d'application** (long identifiant) et non le nom d'affichage.
+7. **Ouvrir l'URL** de l'application, puis Ctrl + F5 après chaque changement de permissions ou de code.
+
+Pour mettre à jour : remplacer les fichiers dans le dossier du workspace, puis *Deploy* sur la même application.
+
+### 8.5 Dépannage
+
+| Symptôme | Cause probable | Correction |
+|---|---|---|
+| « Aucune exécution des 3 agents » | Aucune ligne `multi...` dans `agent_runs_v2` | Lancer `08_multi_agent` jusqu'à la fin |
+| `INSUFFICIENT_PERMISSIONS` ou table introuvable | Droits manquants pour le service principal | Refaire les `GRANT` (y compris `USE CATALOG`) |
+| « Évaluation indisponible » | Pas de `SELECT` sur `known_issues` | Accorder ce droit |
+| Application en erreur au démarrage | Fichier manquant, `app.py` importé comme notebook, ressource `sql-warehouse` absente | Vérifier les types de fichiers et la ressource, puis redéployer |
+| `ModuleNotFoundError` | `requirements.txt` absent ou mal nommé | Corriger le nom, redéployer |
+| Page blanche | Erreur Python | Lire l'onglet *Logs* |
+| Première page lente | Le warehouse est arrêté (arrêt automatique après 10 min) | L'ouvrir une fois avant la démo |
+
+### 8.6 Limites de l'application
+
+- **Troncature des sorties d'outils (12 000 caractères)** : pour certains cas, l'écart, les âges de snapshot et le tableau des différences s'affichent « n/d ». Ce n'est pas une erreur d'affichage : les données manquent dans la table. Correction possible : relancer `08_multi_agent` avec une limite de sauvegarde plus grande. Le rapport `raw` (4 000 caractères) peut aussi être tronqué ; l'application affiche alors seulement la cause et la confiance.
+- **Langue** : les preuves et recommandations sont en anglais pour certains cas, car l'agent a répondu en anglais malgré la consigne. Corriger demande de modifier le prompt (nouvelle version, par exemple `ma_v2`) et de relancer le notebook 08.
+- **Une application par workspace** : elle doit tourner dans le workspace qui contient `agent_runs_v2`. Chaque compte Free Edition a son propre workspace et son propre metastore : les tables d'une camarade ne sont pas visibles.
+- **Free Edition** : jusqu'à 3 applications par compte, arrêt automatique 24 h après un démarrage, une mise à jour ou un redéploiement. Redémarrer l'application juste avant une présentation. Usage non commercial uniquement.
+- **Lecture seule** : pas de bouton « relancer l'agent », c'est la fonctionnalité la plus fragile.
+- **Fichiers dans le Git folder** : ne pas les valider depuis Databricks (voir section 11) ; les télécharger et les téléverser sur github.com.
+- **Ne jamais** copier le client ID, le secret du service principal ou un jeton dans le code, un notebook, une capture d'écran ou GitHub.
+
+### 8.7 Tableau de bord d'évaluation (optionnel)
+
+Databricks Dashboards (disponible sur la Free Edition) peut compléter l'application avec trois jeux de données SQL, dont les chiffres doivent correspondre au rapport d'évaluation (88,9 % pour l'agent unique, 91,7 % pour les 3 agents) :
+
+```sql
+-- 1. Exactitude par exécution
+SELECT a.config, a.batch_id, a.run, COUNT(*) AS n_cases,
+       SUM(CASE WHEN a.predicted = k.expected_root_cause THEN 1 ELSE 0 END) AS n_correct,
+       ROUND(100.0 * SUM(CASE WHEN a.predicted = k.expected_root_cause THEN 1 ELSE 0 END) / COUNT(*), 1) AS accuracy_pct
+FROM workspace.forecast_debug.agent_runs_v2 a
+JOIN workspace.forecast_debug.known_issues k ON a.case_id = k.case_id
+GROUP BY a.config, a.batch_id, a.run ORDER BY a.batch_id, a.run;
+
+-- 2. Résultat par cas (erreurs et instabilité)
+SELECT a.case_id, k.expected_root_cause AS attendu, a.config, a.run, a.predicted AS predit, a.confidence,
+       a.predicted = k.expected_root_cause AS correct
+FROM workspace.forecast_debug.agent_runs_v2 a
+JOIN workspace.forecast_debug.known_issues k ON a.case_id = k.case_id
+ORDER BY a.case_id, a.config, a.run;
+
+-- 3. Coût par configuration
+SELECT config, ROUND(AVG(n_llm), 1) AS appels_llm_moyens, ROUND(AVG(seconds), 1) AS secondes_moyennes,
+       SUM(CASE WHEN repaired THEN 1 ELSE 0 END) AS relances_de_format
+FROM workspace.forecast_debug.agent_runs_v2 GROUP BY config;
+```
+
+Ajouter un texte en haut : « Données synthétiques, 12 cas. Résultats non généralisables. »
+
+### 8.8 Traçage MLflow (optionnel, non confirmé)
+
+Le traçage automatique (`mlflow.openai.autolog()`) pourrait rendre chaque appel d'outil et de LLM visible pas à pas. Son fonctionnement sur la Free Edition avec `get_open_ai_client()` n'a pas été confirmé : à tester dans un notebook séparé (l'installation redémarre Python et casserait les `%run` des notebooks 07 et 08). Si le test échoue, ne pas insister.
+
+---
+
+## 9. Comment reproduire
 
 1. Créer un compte **Databricks Free Edition**.
 2. Créer un notebook `00_setup` (Python, Serverless) et exécuter la création du schéma `forecast_debug`.
@@ -388,8 +538,10 @@ Sur 14 requêtes, **Dense et Hybride ont le même recall@3 mais échouent sur de
 | 5 | `06_llm_connection_test` | `LLM CONNECTION OK` (adapter le modèle) |
 | 6 | `07_agent_single` | Test CASE_009, puis les 12 cas, puis l'évaluation |
 | 7 | `08_multi_agent` | Rapport complet CASE_009, puis les 12 cas |
+| 8 | Application (section 8.4) | Les 12 cas apparaissent dans « Cas à analyser » |
 
 6. Dans `07_agent_single` et `08_multi_agent`, lancer les cellules **une par une** la première fois. Pour la mesure : `N_RUNS = 3`.
+7. Vérifier à la fin de chaque notebook la ligne « Sauvegardé dans workspace.forecast_debug.agent_runs_v2 ». Si elle indique « Sauvegarde impossible », la table n'existe pas et l'application n'aura rien à afficher.
 
 ### Règles d'import à respecter dans les notebooks 07 et 08
 
@@ -400,7 +552,23 @@ Sur 14 requêtes, **Dense et Hybride ont le même recall@3 mais échouent sur de
 
 ---
 
-## 9. Difficultés rencontrées et leçons
+## 10. Démo de 5 minutes
+
+| Temps | Écran | À dire et à faire |
+|---|---|---|
+| 0:00 à 0:30 | En-tête | « Notre entreprise calcule les prévisions de deux façons. Quand elles diffèrent, quelqu'un enquête à la main. Nos agents le font en quelques secondes et expliquent pourquoi. » |
+| 0:30 à 1:00 | Analyse, tout le lot | Compteurs et liste « à relire en priorité » : problèmes d'abord, puis confiance la plus faible |
+| 1:00 à 2:30 | Analyse, CASE_009 | Snapshot de 50 h contre la limite de 24 h ; la différence de `sales_7d` est un **symptôme**, la cause racine est `STALE_DATA` ; ouvrir les preuves, la recommandation et la vérification par le code |
+| 2:30 à 3:15 | Analyse, CASE_007 | « Aucun problème » : l'agent n'invente pas de cause malgré 6 h de décalage |
+| 3:15 à 4:00 | Architecture | Deux agents en parallèle, un analyste, une vérification par le code ; outils en lecture seule, vérité terrain cachée |
+| 4:00 à 4:40 | Évaluation et limites | Exactitude et coût mesurés ; dire que les 3 agents ne sont pas démontrés meilleurs que l'agent unique et coûtent deux fois plus |
+| 4:40 à 5:00 | Conclusion | « La valeur est la traçabilité et la connaissance réutilisable. Prochaine étape : un dataset plus difficile pour se comparer aux règles fixes. » |
+
+Avant la démo : redémarrer l'application, ouvrir la page une fois pour réveiller le warehouse, préparer CASE_009 et CASE_007, garder des captures d'écran et une courte vidéo de secours. Ne pas relancer un agent en direct. Être prêtes à parler de CASE_006 (cause principale fausse faute de règle de priorité) : c'est une limite connue.
+
+---
+
+## 11. Difficultés rencontrées et leçons
 
 | Problème | Ce qui a été observé | Solution retenue |
 |---|---|---|
@@ -409,15 +577,19 @@ Sur 14 requêtes, **Dense et Hybride ont le même recall@3 mais échouent sur de
 | Filtre de colonne dans les outils | Erreur `CANNOT_RESOLVE_DATAFRAME_COLUMN` sur Spark Connect, non reproduite en local | Utiliser `F.col("case_id")` |
 | Scala sur Free Edition | Non supporté | Version PySpark du moteur de comparaison |
 | Réponses vides du LLM | Modèle à raisonnement dont les jetons sont consommés par la réflexion | `max_tokens` élevé et relance de format signalée |
-| Variables disparues après `%run` | `%pip` dans un notebook appelé ; `%run` précédé d'un commentaire | Voir les règles d'import ci-dessus |
+| Variables disparues après `%run` | `%pip` dans un notebook appelé ; `%run` précédé d'un commentaire | Voir les règles d'import |
 | Scores RAG différents entre les deux membres | Listes de requêtes de tailles différentes (7 et 10) | Une seule liste de référence |
+| Table `agent_runs_v2` absente dans un workspace | Chaque compte a son propre workspace et metastore | Relancer 07 et 08 dans son propre workspace ; utiliser ses propres résultats |
+| Droits de l'application | `INSUFFICIENT_PERMISSIONS` tant que le service principal n'a pas de `GRANT` | `GRANT` avec l'identifiant d'application ; vérifier aussi `USE CATALOG` |
+| Panneaux vides dans l'application | Sorties d'outils tronquées à 12 000 caractères dans la table | Lecture des paires complètes du début ; à terme, une limite plus grande dans le notebook 08 |
+| « ? » dans le PDF | Traits d'union et espaces insécables spéciaux du modèle | Remplacement par des caractères simples avant génération |
 | Messages « Failed to connect to MetaMask » | Extension du navigateur, sans lien avec le projet | À ignorer |
 
-Leçon générale : les tests sur Databricks ont révélé des bugs que les tests locaux ne voyaient pas (Spark Connect). Il faut donc valider chaque notebook sur le workspace réel.
+Leçon générale : les tests sur Databricks ont révélé des bugs que les tests locaux ne voyaient pas (Spark Connect, droits du service principal, troncature des sorties). Il faut donc valider chaque notebook et l'application sur le workspace réel, avec les vraies données.
 
 ---
 
-## 10. Limites
+## 12. Limites
 
 - **Données synthétiques** : les résultats valident le système sur des scénarios contrôlés, pas en production. Ne jamais écrire « 95 % en production », mais « X % sur N scénarios contrôlés ».
 - **Dataset petit et propre** : 12 cas, une ou deux causes visibles par cas, valeurs rondes. Les règles font déjà 12/12, donc ce jeu ne permet pas de démontrer un avantage du LLM.
@@ -431,21 +603,25 @@ Leçon générale : les tests sur Databricks ont révélé des bugs que les test
 - **Un seul modèle LLM** (`databricks-gpt-oss-120b`) : les résultats ne sont pas comparés à d'autres modèles.
 - **Free Edition** : accès internet sortant limité, quotas de compute, `get_open_ai_client()` signalé comme obsolète par le SDK (sans effet sur le fonctionnement).
 - **Coût** : le système à 3 agents utilise environ 1,75 fois plus d'appels LLM et 2 fois plus de temps que l'agent unique, sans gain démontré sur ce dataset.
+- **Application** : voir 8.6 (sorties tronquées, texte parfois en anglais, lecture seule, arrêt automatique après 24 h).
 
 ---
 
-## 11. Ce qui reste à faire
+## 13. Ce qui reste à faire
 
-1. **Dataset v2** : 60 à 100 cas avec bruit (petites différences sans importance), cas ambigus, cas hors règles, cas « preuves insuffisantes » (table vide, valeurs manquantes), et un découpage **développement / test** : le groupe de test n'est jamais utilisé pendant le réglage. C'est le seul moyen de comparer sérieusement règles, agent unique et 3 agents.
-2. **Règle de priorité entre causes multiples** (CASE_006) : la définir dans les documents ou le prompt, en la justifiant, puis la tester sur de **nouveaux** cas.
-3. **Mesure du RAG** : `USE_RAG = False` sur l'agent unique et sur les 3 agents, avec 3 passes chacun.
-4. **Mettre à jour `RAPPORT_EVALUATION.md`** avec les résultats du dataset v2 et des 3 passes des 3 agents.
-5. **Démo de 5 minutes** : une question, un rapport structuré (CASE_009 convient), puis le tableau de résultats.
-6. **Sauvegarde sur GitHub** de tous les notebooks (upload web si le push Databricks échoue).
+1. **Valider `theme.py`** dans l'application déployée (comparaison Batch / Real-Time, jauges, déroulé) et corriger les éventuels écarts.
+2. **Augmenter la limite de sauvegarde des sorties d'outils** dans `08_multi_agent` et relancer, pour que les panneaux de mesures soient remplis pour tous les cas.
+3. **Dataset v2** : 60 à 100 cas avec bruit (petites différences sans importance), cas ambigus, cas hors règles, cas « preuves insuffisantes » (table vide, valeurs manquantes), et un découpage **développement / test** : le groupe de test n'est jamais utilisé pendant le réglage. C'est le seul moyen de comparer sérieusement règles, agent unique et 3 agents.
+4. **Règle de priorité entre causes multiples** (CASE_006) : la définir dans les documents ou le prompt, en la justifiant, puis la tester sur de **nouveaux** cas.
+5. **Mesure du RAG** : `USE_RAG = False` sur l'agent unique et sur les 3 agents, avec 3 passes chacun.
+6. **3 passes des 3 agents** (`N_RUNS = 3`), puis mise à jour de **`RAPPORT_EVALUATION.md`**.
+7. **Tableau de bord d'évaluation** (section 8.7) et capture d'écran pour le rapport.
+8. **Répéter la démo** de 5 minutes (section 10).
+9. **Sauvegarde sur GitHub** de tous les notebooks et des fichiers de l'application (upload web si le push Databricks échoue).
 
 ---
 
-## 12. Règles de travail
+## 14. Règles de travail
 
 - Valider les données et les outils avant de toucher au LLM.
 - Ne jamais donner accès à `known_issues` aux agents.
@@ -453,4 +629,6 @@ Leçon générale : les tests sur Databricks ont révélé des bugs que les test
 - Ne pas retoucher un prompt après avoir vu ses erreurs sans changer son nom de version et sans l'évaluer sur de nouveaux cas.
 - Garder le même modèle et `temperature = 0` pour toutes les mesures.
 - Garder toutes les passes dans `agent_runs_v2`, même les mauvaises.
+- Ne jamais mettre de jeton, de secret ou d'identifiant de service principal dans le code ou sur GitHub.
+- Présenter l'application comme un prototype non commercial sur données synthétiques.
 - Pull avant de travailler, commit et push en fin de session.
