@@ -1,63 +1,75 @@
-"""Forecast Debugging Agent - frontend (Streamlit, Databricks Apps).
+"""Forecast Debugging Agent - application d'analyse Batch vs Real-Time (Streamlit, Databricks Apps).
 
-Lit les résultats du système à 3 agents dans Unity Catalog (table agent_runs_v2) et les présente :
-vue d'ensemble, détail d'un cas, architecture, évaluation et limites.
-Sans DATABRICKS_WAREHOUSE_ID, l'application démarre en mode démonstration avec des données FICTIVES.
+L'interface démarre vide. On choisit un cas (ou tout le lot), on lance l'analyse, puis on obtient un rapport
+avec graphiques, différences, preuves sourcées, recommandation et un PDF imprimable.
+Les agents ont déjà tourné dans Databricks : l'application relit leur analyse enregistrée (table agent_runs_v2).
+Sans DATABRICKS_WAREHOUSE_ID, elle démarre en mode démonstration avec des données FICTIVES.
 """
 import html
+import io
 import json
 import os
 import re
+import time
 from datetime import datetime
+from xml.sax.saxutils import escape as xml_escape
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
 SCHEMA = os.getenv("FD_SCHEMA", "workspace.forecast_debug")
 WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID")
 DEMO = not WAREHOUSE_ID
-STALE_HOURS = 24
+STALE_HOURS = 24      # règle documentée : snapshot obsolète au-delà de 24 h
+TOLERANCE_PCT = 5     # règle documentée : écart toléré jusqu'à 5 %
+STEP_PAUSE = 0.45
 
+CAUSE_COLOR = {"STALE_DATA": "#F59E0B", "DATA_MISMATCH": "#3B82F6", "FEATURE_MISMATCH": "#8B5CF6",
+               "CONFIG_MISMATCH": "#EC4899", "MODEL_VERSION_MISMATCH": "#EF4444", "NO_ISSUE": "#10B981"}
 CAUSE_TEXT = {
     "STALE_DATA": "Données obsolètes : le snapshot du Batch est trop ancien",
     "DATA_MISMATCH": "Les deux pipelines ont lu des données différentes",
     "FEATURE_MISMATCH": "Une variable d'entrée (promotion, prix...) diffère",
     "CONFIG_MISMATCH": "Une configuration (horizon, prétraitement...) diffère",
     "MODEL_VERSION_MISMATCH": "Les deux pipelines n'utilisent pas la même version du modèle",
-    "NO_ISSUE": "Aucun problème : écart dans la tolérance",
+    "NO_ISSUE": "Aucun problème : l'écart est dans la tolérance",
 }
-CONF_ICON = {"high": "🟢 haute", "medium": "🟡 moyenne", "low": "🔴 faible"}
-CONF_RANK = {"low": 0, "medium": 1, "high": 2}
+CONF_FR = {"high": "haute", "medium": "moyenne", "low": "faible"}
+CONF_COLOR = {"high": "#10B981", "medium": "#F59E0B", "low": "#EF4444"}
 
 st.set_page_config(page_title="Forecast Debugging Agent", page_icon="🔎", layout="wide")
 
-CAUSE_COLOR = {"STALE_DATA": "#F59E0B", "DATA_MISMATCH": "#3B82F6", "FEATURE_MISMATCH": "#8B5CF6",
-               "CONFIG_MISMATCH": "#EC4899", "MODEL_VERSION_MISMATCH": "#EF4444", "NO_ISSUE": "#10B981"}
-CONF_COLOR = {"high": "#10B981", "medium": "#F59E0B", "low": "#EF4444"}
-
 st.markdown("""
 <style>
-.block-container {padding-top: 1.6rem; max-width: 1200px;}
+.block-container {padding-top: 1.4rem; max-width: 1250px;}
 .hero {background: linear-gradient(120deg, #1E1B4B 0%, #4F46E5 60%, #06B6D4 100%); color: #fff;
-       padding: 28px 32px; border-radius: 18px; margin-bottom: 14px;}
-.hero h1 {margin: 0; font-size: 2rem; color: #fff;}
-.hero p {margin: 6px 0 0 0; font-size: 1.02rem; opacity: .92;}
-.notice {background: #FFF7E6; border: 1px solid #FCD9A0; color: #7A4B00; border-radius: 10px;
-         padding: 8px 14px; font-size: .86rem; margin-bottom: 14px;}
-.kpi {background: #fff; border-radius: 14px; padding: 16px 18px; border: 1px solid #E5E7EB;
+       padding: 26px 32px; border-radius: 18px; margin-bottom: 12px;}
+.hero h1 {margin: 0; font-size: 2rem; color: #fff !important;}
+.hero p {margin: 6px 0 0 0; font-size: 1.02rem; color: #fff; opacity: .93;}
+.notice {background: #FFF7E6; border: 1px solid #FCD9A0; color: #7A4B00 !important; border-radius: 10px;
+         padding: 8px 14px; font-size: .86rem; margin-bottom: 12px;}
+.card {background: #fff; color: #111827; border: 1px solid #E5E7EB; border-radius: 14px; padding: 16px 18px;
+       box-shadow: 0 1px 3px rgba(17,24,39,.06); height: 100%;}
+.card h4 {margin: 0 0 6px 0; color: #111827; font-size: 1rem;}
+.card p {margin: 0; color: #4B5563; font-size: .9rem;}
+.kpi {background: #fff; color: #111827; border-radius: 14px; padding: 14px 18px; border: 1px solid #E5E7EB;
       box-shadow: 0 1px 3px rgba(17,24,39,.06);}
-.kpi .v {font-size: 2rem; font-weight: 700; line-height: 1.1;}
-.kpi .l {color: #6B7280; font-size: .85rem; margin-top: 2px;}
+.kpi .v {font-size: 1.9rem; font-weight: 700; line-height: 1.1;}
+.kpi .l {color: #6B7280; font-size: .82rem; margin-top: 2px;}
 .chip {display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: .78rem; font-weight: 600;
-       color: #fff; margin-right: 6px;}
-.case {background: #fff; border: 1px solid #E5E7EB; border-left: 6px solid #9CA3AF; border-radius: 12px;
-       padding: 12px 16px; margin-bottom: 10px; box-shadow: 0 1px 2px rgba(17,24,39,.05);}
-.case .t {font-weight: 700; margin-bottom: 4px;}
-.case .r {color: #374151; font-size: .9rem; margin-top: 6px;}
-.ev {background: #fff; border: 1px solid #E5E7EB; border-radius: 10px; padding: 10px 14px; margin-bottom: 8px;}
-.ev .s {color: #6B7280; font-size: .78rem; font-family: monospace;}
-.reco {background: #ECFDF5; border: 1px solid #A7F3D0; color: #065F46; border-radius: 12px;
-       padding: 12px 16px; margin: 10px 0;}
+       color: #fff !important; margin-right: 6px;}
+.verdict {background: #fff; color: #111827; border: 1px solid #E5E7EB; border-left: 8px solid #9CA3AF;
+          border-radius: 14px; padding: 16px 20px; margin: 6px 0 14px 0; box-shadow: 0 1px 3px rgba(17,24,39,.06);}
+.verdict h2 {margin: 0 0 6px 0; color: #111827; font-size: 1.5rem;}
+.verdict p {margin: 4px 0 0 0; color: #374151;}
+.ev {background: #fff; color: #111827; border: 1px solid #E5E7EB; border-radius: 10px; padding: 10px 14px; margin-bottom: 8px;}
+.ev .s {color: #6B7280; font-size: .78rem; font-family: monospace; margin-top: 2px;}
+.reco {background: #ECFDF5; border: 1px solid #A7F3D0; color: #065F46; border-radius: 12px; padding: 12px 16px; margin: 8px 0;}
+.chain {display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 12px 0;}
+.node {background: #EEF2FF; color: #1E1B4B; border: 1px solid #C7D2FE; border-radius: 10px; padding: 8px 12px; font-size: .88rem;}
+.arrow {color: #6B7280; font-size: 1.2rem;}
+.empty {text-align: center; color: #6B7280; padding: 18px 0 6px 0;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -72,6 +84,7 @@ def chip(text, color):
 
 def kpi(value, label, color="#111827"):
     return f'<div class="kpi"><div class="v" style="color:{color}">{esc(value)}</div><div class="l">{esc(label)}</div></div>'
+
 
 # ---------------------------------------------------------------- accès aux données
 if not DEMO:
@@ -98,43 +111,63 @@ if not DEMO:
 
 
 def _demo_frames():
-    def row(case, pred, sec, conf, rep, outs):
-        return {"batch_id": "DEMO_BATCH", "config": "multi_rag_demo", "run": 1, "case_id": case,
-                "predicted": pred, "secondary": json.dumps(sec), "confidence": conf, "n_tools": 5,
+    def feat(name, b, r):
+        return {"name": name, "batch_value": str(b), "realtime_value": str(r), "is_different": str(b) != str(r)}
+
+    def make(case, pred, sec, conf, evidence, reco, fb, fr_, ages, feats, cfgs, warn, docs):
+        diff_f = [f["name"] for f in feats if f["is_different"]]
+        diff_c = [c["name"] for c in cfgs if c["is_different"]]
+        outs = [
+            ["get_forecasts", json.dumps({"case_id": case, "batch_forecast": fb, "realtime_forecast": fr_,
+                                          "difference": fr_ - fb, "difference_pct": round(100 * (fr_ - fb) / fb, 2)})],
+            ["compare_features", json.dumps({"features": feats, "differing_features": diff_f})],
+            ["compare_configs", json.dumps({"configs": cfgs, "differing_configs": diff_c})],
+            ["check_freshness", json.dumps({"batch_age_hours": ages[0], "realtime_age_hours": ages[1],
+                                            "snapshot_gap_hours": round(ages[0] - ages[1], 1)})],
+            ["get_pipeline_logs", json.dumps({"batch": {"status": "SUCCESS_WITH_WARNINGS" if warn else "SUCCESS",
+                                                        "warning_message": warn},
+                                              "realtime": {"status": "SUCCESS", "warning_message": None}})],
+            ["search_knowledge", json.dumps({"query": "exemple", "results": [{"doc_id": d, "section": "Règles"} for d in docs]})],
+        ]
+        rep = {"primary_cause": pred, "secondary_causes": sec, "confidence": conf, "evidence": evidence,
+               "recommendation": reco, "verification": {"passed": True, "problems": [], "revised": False}}
+        return {"batch_id": "DEMO_BATCH", "config": "multi_rag_demo", "run": 1, "case_id": case, "predicted": pred,
+                "secondary": json.dumps(sec), "confidence": conf, "n_tools": 5,
                 "tools": "get_forecasts,compare_features,compare_configs,check_freshness,get_pipeline_logs",
                 "n_llm": 11, "seconds": 16.0, "repaired": False, "raw": json.dumps(rep),
                 "tool_outputs": json.dumps(outs), "ts": "2026-01-01T10:00:00"}
 
-    def verif(ok=True):
-        return {"passed": ok, "problems": [], "revised": False, "sources_allowed": []}
-
-    fc = lambda b, r: ["get_forecasts", json.dumps({"batch_forecast": b, "realtime_forecast": r,
-                                                    "difference": r - b, "difference_pct": round(100 * (r - b) / b, 2)})]
-    fr = lambda a, b: ["check_freshness", json.dumps({"batch_age_hours": a, "realtime_age_hours": b})]
-    runs = pd.DataFrame([
-        row("DEMO_01", "STALE_DATA", [], "high",
-            {"primary_cause": "STALE_DATA", "secondary_causes": [], "confidence": "high",
-             "evidence": [{"claim": "Le snapshot Batch a 50 h (exemple fictif)", "source": "tool:check_freshness"},
-                          {"claim": "Règle : au-delà de 24 h un snapshot est obsolète", "source": "doc:exemple"}],
-             "recommendation": "Relancer l'ingestion en amont, puis le Batch (exemple fictif).",
-             "verification": verif()}, [fc(950, 1300), fr(50, 1)]),
-        row("DEMO_02", "NO_ISSUE", [], "high",
-            {"primary_cause": "NO_ISSUE", "secondary_causes": [], "confidence": "high",
-             "evidence": [{"claim": "Écart de 3,7 % (exemple fictif)", "source": "tool:get_forecasts"}],
-             "recommendation": "Aucune action.", "verification": verif()}, [fc(1500, 1555), fr(2, 0.1)]),
-        row("DEMO_03", "CONFIG_MISMATCH", ["FEATURE_MISMATCH"], "medium",
-            {"primary_cause": "CONFIG_MISMATCH", "secondary_causes": ["FEATURE_MISMATCH"], "confidence": "medium",
-             "evidence": [{"claim": "Horizon 7 contre 14 jours (exemple fictif)", "source": "tool:compare_configs"}],
-             "recommendation": "Aligner l'horizon, puis vérifier la promotion.", "verification": verif()},
-            [fc(1100, 1600), fr(2, 2)]),
-    ])
+    base_f = lambda sales: [feat("price", 20, 20), feat("promotion", 0, 0), feat("sales_7d", *sales), feat("stock_level", 500, 500)]
+    base_c = lambda h: [feat("feature_set_version", "FS1", "FS1"), feat("forecast_horizon_days", *h),
+                        feat("model_version", "V2", "V2"), feat("preprocessing", "standardization", "standardization")]
+    rows = [
+        make("DEMO_01", "STALE_DATA", [], "high",
+             [{"claim": "Le snapshot Batch a 50 h (exemple fictif)", "source": "tool:check_freshness"},
+              {"claim": "Règle documentée : au-delà de 24 h, un snapshot est obsolète", "source": "doc:02_freshness_rules"},
+              {"claim": "sales_7d diffère (90 contre 125) : symptôme de l'obsolescence", "source": "tool:compare_features"}],
+             "Relancer l'ingestion en amont, puis le Batch.", 950, 1300, (50, 1.1),
+             base_f((90, 125)), base_c((7, 7)), "Upstream table sales_daily not refreshed", ["02_freshness_rules", "07_incident_stale"]),
+        make("DEMO_02", "NO_ISSUE", [], "high",
+             [{"claim": "Écart de 3,7 %, sous la tolérance (exemple fictif)", "source": "tool:get_forecasts"}],
+             "Aucune action.", 1500, 1555, (2, 0.1), base_f((100, 100)), base_c((7, 7)), None, ["03_forecast_tolerance"]),
+        make("DEMO_03", "CONFIG_MISMATCH", ["FEATURE_MISMATCH"], "medium",
+             [{"claim": "Horizon de 7 jours contre 14 jours (exemple fictif)", "source": "tool:compare_configs"}],
+             "Aligner l'horizon, puis vérifier la promotion.", 1100, 1600, (2, 2.1),
+             base_f((100, 100)), base_c((7, 14)), None, ["05_model_versions"]),
+        make("DEMO_04", "FEATURE_MISMATCH", [], "high",
+             [{"claim": "promotion vaut 0 d'un côté et 1 de l'autre (exemple fictif)", "source": "tool:compare_features"}],
+             "Synchroniser la table des promotions.", 1000, 1350, (2, 1.5),
+             [feat("price", 20, 20), feat("promotion", 0, 1), feat("sales_7d", 100, 100), feat("stock_level", 500, 500)],
+             base_c((7, 7)), None, ["04_feature_definitions"]),
+    ]
+    runs = pd.DataFrame(rows)
     batches = pd.DataFrame([{"batch_id": "DEMO_BATCH", "ts": "2026-01-01T10:00:00", "runs": 1}])
     ev = pd.DataFrame([{"config": "3 agents", "batch_id": "DEMO_BATCH", "run": 1, "accuracy_pct": 100.0,
                         "llm_calls": 11.0, "seconds": 16.0}])
     return runs, batches, ev
 
 
-def _safe_id(x: str) -> str:
+def _safe_id(x) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_]+", str(x)):
         raise ValueError("identifiant invalide")
     return str(x)
@@ -166,23 +199,13 @@ def load_eval():
         GROUP BY 1, a.batch_id, a.run ORDER BY a.batch_id, a.run""")
 
 
-# ---------------------------------------------------------------- lecture des résultats
+# ---------------------------------------------------------------- lecture des résultats enregistrés
 def parse_report(raw):
     try:
         d = json.loads(raw)
         return d if isinstance(d, dict) else None
     except Exception:
         return None
-
-
-def tool_data(tool_outputs, name):
-    try:
-        for item in json.loads(tool_outputs):
-            if isinstance(item, list) and len(item) == 2 and item[0] == name:
-                return json.loads(item[1])
-    except Exception:
-        return None
-    return None
 
 
 def parse_list(s):
@@ -193,22 +216,224 @@ def parse_list(s):
         return []
 
 
-def build_cases(df):
+def tool_all(tool_outputs, name):
     out = []
-    for _, r in df.iterrows():
-        rep = parse_report(r["raw"]) or {}
-        ver = rep.get("verification") or {}
-        conf = str(r["confidence"]).lower()
-        out.append({
-            "Cas": r["case_id"], "Cause principale": r["predicted"],
-            "Autres causes": ", ".join(parse_list(r["secondary"])) or "-",
-            "Confiance": CONF_ICON.get(conf, "n/d"),
-            "Vérification": ("✅ réussie" if ver.get("passed") else "⚠️ à revoir") if ver else "n/d",
-            "Recommandation": rep.get("recommendation") or "n/d",
-            "_issue": r["predicted"] != "NO_ISSUE", "_conf": CONF_RANK.get(conf, 1),
-        })
-    cases = pd.DataFrame(out)
-    return cases.sort_values(["_issue", "_conf"], ascending=[False, True]).reset_index(drop=True)
+    try:
+        for item in json.loads(tool_outputs):
+            if isinstance(item, list) and len(item) == 2 and item[0] == name:
+                try:
+                    out.append(json.loads(item[1]))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return out
+
+
+def tool_data(tool_outputs, name):
+    found = tool_all(tool_outputs, name)
+    return found[0] if found else None
+
+
+def case_facts(row):
+    to = row["tool_outputs"]
+    docs = []
+    for item in tool_all(to, "search_knowledge"):
+        for r in (item or {}).get("results", []):
+            if r.get("doc_id") and r["doc_id"] not in docs:
+                docs.append(r["doc_id"])
+    return {
+        "case": row["case_id"], "cause": row["predicted"], "conf": str(row["confidence"]).lower(),
+        "secondary": parse_list(row["secondary"]), "rep": parse_report(row["raw"]) or {},
+        "fc": tool_data(to, "get_forecasts"), "fr": tool_data(to, "check_freshness"),
+        "feats": (tool_data(to, "compare_features") or {}).get("features", []),
+        "cfgs": (tool_data(to, "compare_configs") or {}).get("configs", []),
+        "logs": tool_data(to, "get_pipeline_logs") or {}, "docs": docs,
+        "tools": [t for t in str(row["tools"] or "").split(",") if t],
+    }
+
+
+def diff_table(f):
+    rows = []
+    for kind, items in (("Variable", f["feats"]), ("Configuration", f["cfgs"])):
+        for it in items:
+            rows.append({"Type": kind, "Élément": it.get("name"), "Batch": it.get("batch_value"),
+                         "Real-Time": it.get("realtime_value"), "Différent": "oui" if it.get("is_different") else "non"})
+    df = pd.DataFrame(rows)
+    return df.sort_values("Différent", ascending=False, kind="stable").reset_index(drop=True) if not df.empty else df
+
+
+def differing(f):
+    return [f"{it.get('name')} : {it.get('batch_value')} contre {it.get('realtime_value')}"
+            for it in f["feats"] + f["cfgs"] if it.get("is_different")]
+
+
+def ver_label(rep):
+    ver = rep.get("verification") or {}
+    if not ver:
+        return "n/d"
+    return "réussie" if ver.get("passed") else "à revoir"
+
+
+# ---------------------------------------------------------------- graphiques
+def chart_forecasts(fc):
+    d = pd.DataFrame({"Pipeline": ["Batch", "Real-Time"], "Prévision": [fc["batch_forecast"], fc["realtime_forecast"]]})
+    base = alt.Chart(d).encode(
+        x=alt.X("Pipeline:N", axis=alt.Axis(labelAngle=0, title=None, labelFontSize=13)),
+        y=alt.Y("Prévision:Q", title="Unités prévues"),
+        color=alt.Color("Pipeline:N", legend=None,
+                        scale=alt.Scale(domain=["Batch", "Real-Time"], range=["#F59E0B", "#4F46E5"])))
+    bars = base.mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, size=80)
+    labels = base.mark_text(dy=-10, fontSize=15, fontWeight="bold").encode(text="Prévision:Q", color=alt.value("#111827"))
+    return (bars + labels).properties(height=280)
+
+
+def chart_freshness(fr):
+    d = pd.DataFrame({"Pipeline": ["Batch", "Real-Time"], "Âge": [fr["batch_age_hours"], fr["realtime_age_hours"]]})
+    bars = alt.Chart(d).mark_bar(cornerRadiusTopRight=8, cornerRadiusBottomRight=8, size=34).encode(
+        y=alt.Y("Pipeline:N", title=None, axis=alt.Axis(labelFontSize=13)),
+        x=alt.X("Âge:Q", title="Âge du snapshot (heures)", scale=alt.Scale(domainMin=0, domainMax=max(30, float(fr["batch_age_hours"]) * 1.15))),
+        color=alt.Color("Pipeline:N", legend=None,
+                        scale=alt.Scale(domain=["Batch", "Real-Time"], range=["#F59E0B", "#4F46E5"])))
+    rule = alt.Chart(pd.DataFrame({"x": [STALE_HOURS], "t": [f"limite {STALE_HOURS} h"]})).mark_rule(
+        color="#EF4444", strokeDash=[6, 4], size=2).encode(x="x:Q")
+    note = alt.Chart(pd.DataFrame({"x": [STALE_HOURS], "t": [f"limite {STALE_HOURS} h"]})).mark_text(
+        align="left", dx=5, dy=-4, color="#EF4444", fontWeight="bold").encode(x="x:Q", text="t:N", y=alt.value(10))
+    return (bars + rule + note).properties(height=170)
+
+
+def chart_causes(cases_df):
+    d = cases_df.groupby("Cause").size().reset_index(name="Cas")
+    doms = list(CAUSE_COLOR)
+    return alt.Chart(d).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
+        x=alt.X("Cause:N", sort="-y", axis=alt.Axis(labelAngle=-30, title=None)),
+        y=alt.Y("Cas:Q", title="Nombre de cas", axis=alt.Axis(tickMinStep=1)),
+        color=alt.Color("Cause:N", legend=None, scale=alt.Scale(domain=doms, range=[CAUSE_COLOR[c] for c in doms])),
+        tooltip=["Cause", "Cas"]).properties(height=260)
+
+
+def chart_map(points):
+    doms = list(CAUSE_COLOR)
+    sc = alt.Chart(points).mark_circle(size=260, opacity=.9).encode(
+        x=alt.X("Écart (%):Q", title="Écart Batch / Real-Time (%)"),
+        y=alt.Y("Âge snapshot Batch (h):Q", title="Âge du snapshot Batch (h)"),
+        color=alt.Color("Cause:N", scale=alt.Scale(domain=doms, range=[CAUSE_COLOR[c] for c in doms])),
+        tooltip=["Cas", "Cause", "Écart (%)", "Âge snapshot Batch (h)"])
+    rx = alt.Chart(pd.DataFrame({"x": [TOLERANCE_PCT]})).mark_rule(color="#9CA3AF", strokeDash=[6, 4]).encode(x="x:Q")
+    ry = alt.Chart(pd.DataFrame({"y": [STALE_HOURS]})).mark_rule(color="#9CA3AF", strokeDash=[6, 4]).encode(y="y:Q")
+    return (sc + rx + ry).properties(height=340)
+
+
+# ---------------------------------------------------------------- PDF
+def _pdf_text(s):
+    return xml_escape(str(s if s is not None else "")).encode("cp1252", "replace").decode("cp1252")
+
+
+def _pdf_base(title, subtitle):
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=1.8 * cm, rightMargin=1.8 * cm, topMargin=1.6 * cm,
+                            bottomMargin=1.6 * cm, title=_pdf_text(title))
+    ss = getSampleStyleSheet()
+    st_ = {
+        "title": ParagraphStyle("t", parent=ss["Title"], fontSize=20, textColor=colors.HexColor("#1E1B4B"), alignment=0),
+        "h2": ParagraphStyle("h2", parent=ss["Heading2"], fontSize=13, textColor=colors.HexColor("#4F46E5"), spaceBefore=12),
+        "body": ParagraphStyle("b", parent=ss["BodyText"], fontSize=9.5, leading=13),
+        "small": ParagraphStyle("s", parent=ss["BodyText"], fontSize=8, leading=10, textColor=colors.HexColor("#6B7280")),
+        "cell": ParagraphStyle("c", parent=ss["BodyText"], fontSize=8.5, leading=10.5),
+    }
+    story = [Paragraph(_pdf_text(title), st_["title"]), Paragraph(_pdf_text(subtitle), st_["small"]), Spacer(1, 8)]
+    return buf, doc, st_, story
+
+
+def _pdf_table(data, widths, header=True):
+    from reportlab.lib import colors
+    from reportlab.platypus import Table, TableStyle
+    t = Table(data, colWidths=widths, repeatRows=1 if header else 0)
+    style = [("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D1D5DB")), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")])]
+    if header:
+        style += [("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEF2FF"))]
+    t.setStyle(TableStyle(style))
+    return t
+
+
+DISCLAIMER = ("Prototype non commercial. Donnees synthetiques. L'analyse est produite par des agents LLM et peut etre "
+              "inexacte : verifiez la confiance et la verification avant d'agir. La verification par le code controle "
+              "les sources et les nombres cites, pas la logique du raisonnement.")
+
+
+def case_pdf(f, run_label):
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, Spacer
+    buf, doc, S, story = _pdf_base(f"Rapport de diagnostic - {f['case']}",
+                                   f"Execution : {run_label} - genere le {datetime.now():%Y-%m-%d %H:%M}")
+    P = lambda t, s="body": Paragraph(_pdf_text(t), S[s])
+    rep = f["rep"]
+    story += [P("Verdict", "h2")]
+    story.append(_pdf_table([
+        [P("Cause principale", "cell"), P(f["cause"], "cell")],
+        [P("Explication", "cell"), P(CAUSE_TEXT.get(f["cause"], ""), "cell")],
+        [P("Autres causes", "cell"), P(", ".join(f["secondary"]) or "-", "cell")],
+        [P("Confiance", "cell"), P(CONF_FR.get(f["conf"], "n/d"), "cell")],
+        [P("Verification par le code", "cell"), P(ver_label(rep), "cell")]], [4.5 * cm, 12.5 * cm], header=False))
+    fc, fr = f["fc"], f["fr"]
+    if fc or fr:
+        story += [P("Mesures", "h2")]
+        rows = []
+        if fc:
+            rows += [[P("Prevision Batch", "cell"), P(fc["batch_forecast"], "cell")],
+                     [P("Prevision Real-Time", "cell"), P(fc["realtime_forecast"], "cell")],
+                     [P("Ecart", "cell"), P(f"{fc.get('difference')} unites ({fc.get('difference_pct')} %)", "cell")]]
+        if fr:
+            rows += [[P("Age du snapshot Batch", "cell"), P(f"{fr['batch_age_hours']} h (limite documentee : {STALE_HOURS} h)", "cell")],
+                     [P("Age du snapshot Real-Time", "cell"), P(f"{fr['realtime_age_hours']} h", "cell")]]
+        story.append(_pdf_table(rows, [4.5 * cm, 12.5 * cm], header=False))
+    dt = diff_table(f)
+    if not dt.empty:
+        story += [P("Elements compares", "h2")]
+        data = [[P(h, "cell") for h in ["Type", "Element", "Batch", "Real-Time", "Different"]]]
+        for _, r in dt.iterrows():
+            data.append([P(r[c], "cell") for c in ["Type", "Élément", "Batch", "Real-Time", "Différent"]])
+        story.append(_pdf_table(data, [3 * cm, 5 * cm, 3.2 * cm, 3.2 * cm, 2.6 * cm]))
+    if rep.get("evidence"):
+        story += [P("Preuves et sources", "h2")]
+        for e in rep["evidence"]:
+            story += [P(f"- {e.get('claim')}"), P(f"  source : {e.get('source') or 'non citee'}", "small")]
+    if rep.get("recommendation"):
+        story += [P("Recommandation", "h2"), P(rep["recommendation"])]
+    story += [Spacer(1, 14), P(DISCLAIMER, "small")]
+    doc.build(story)
+    return buf.getvalue()
+
+
+def batch_pdf(table, run_label):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, Spacer
+    buf, doc, S, story = _pdf_base("Rapport d'analyse du lot",
+                                   f"Execution : {run_label} - genere le {datetime.now():%Y-%m-%d %H:%M}")
+    P = lambda t, s="cell": Paragraph(_pdf_text(t), S[s])
+    n, n_issue = len(table), int((table["Cause"] != "NO_ISSUE").sum())
+    story += [P("Synthese", "h2"), P(f"{n} cas analyses, {n_issue} avec un probleme, {n - n_issue} sans probleme.", "body")]
+    counts = table["Cause"].value_counts()
+    story.append(_pdf_table([[P("Cause", "cell"), P("Cas", "cell")]] + [[P(c, "cell"), P(int(v), "cell")] for c, v in counts.items()],
+                            [8 * cm, 3 * cm]))
+    story += [P("Detail par cas", "h2")]
+    data = [[P(h) for h in ["Cas", "Cause", "Conf.", "Verif.", "Ecart %", "Age Batch h", "Recommandation"]]]
+    for _, r in table.iterrows():
+        reco = str(r["Recommandation"])
+        data.append([P(r["Cas"]), P(r["Cause"]), P(r["Confiance"]), P(r["Vérification"]), P(r["Écart (%)"]),
+                     P(r["Âge snapshot Batch (h)"]), P(reco if len(reco) < 90 else reco[:87] + "...")])
+    story.append(_pdf_table(data, [1.9 * cm, 3.4 * cm, 1.5 * cm, 1.6 * cm, 1.5 * cm, 1.7 * cm, 5.6 * cm]))
+    story += [Spacer(1, 14), P(DISCLAIMER, "small")]
+    doc.build(story)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------- interface
@@ -216,15 +441,15 @@ st.markdown(
     '<div class="hero"><h1>🔎 Forecast Debugging Agent</h1>'
     "<p>Pourquoi une prévision Batch et une prévision Real-Time diffèrent-elles ? "
     "Trois agents enquêtent, citent leurs preuves et proposent une action.</p></div>"
-    '<div class="notice">Prototype non commercial · données <b>synthétiques</b>, 12 cas · '
+    '<div class="notice">Prototype non commercial · données <b>synthétiques</b> · '
     "l'agent peut se tromper : vérifiez la confiance et la vérification avant d'agir.</div>",
     unsafe_allow_html=True)
 if DEMO:
-    st.info("Mode démonstration : les cas affichés sont **fictifs**. "
-            "Sur Databricks, l'application lit la table agent_runs_v2.")
+    st.info("Mode démonstration : les cas affichés sont **fictifs**. Ajoutez la ressource SQL warehouse "
+            "(clé `sql-warehouse`) dans les paramètres de l'application pour lire vos résultats réels.")
 
 with st.sidebar:
-    st.header("Exécution affichée")
+    st.header("Résultats à analyser")
     batches = load_batches()
     if batches.empty:
         st.error("Aucune exécution des 3 agents dans agent_runs_v2. Lancez le notebook 08_multi_agent.")
@@ -234,118 +459,195 @@ with st.sidebar:
     batch_id = st.selectbox("Exécution", list(labels), format_func=lambda b: labels[b])
     n_runs = int(batches.loc[batches["batch_id"] == batch_id, "runs"].iloc[0])
     run = st.selectbox("Passe", list(range(1, n_runs + 1))) if n_runs > 1 else 1
-    if st.button("Actualiser"):
+    if st.button("Actualiser les données"):
         if not DEMO:
             st.cache_data.clear()
         st.rerun()
-    st.caption(f"Page lue à {datetime.now().strftime('%H:%M:%S')} (cache de 30 s).")
+    st.caption(f"Lu à {datetime.now().strftime('%H:%M:%S')} (cache de 30 s).")
+run_label = f"{labels[batch_id]}, passe {run}"
 
 runs_df = load_runs(batch_id, run)
 if runs_df.empty:
     st.error("Cette exécution ne contient aucun cas.")
     st.stop()
-cases = build_cases(runs_df)
+facts = {r["case_id"]: case_facts(r) for _, r in runs_df.iterrows()}
+case_ids = sorted(facts)
 
-tab1, tab2, tab3, tab4 = st.tabs(["À traiter", "Détail d'un cas", "Comment ça marche", "Évaluation et limites"])
+tab_main, tab_arch, tab_eval = st.tabs(["Analyse", "Architecture", "Évaluation et limites"])
 
-# ---- 1. triage
-with tab1:
-    n = len(cases)
-    n_issue = int(cases["_issue"].sum())
-    n_low = int((cases["Confiance"] == CONF_ICON["low"]).sum())
-    n_ver = int((cases["Vérification"] == "⚠️ à revoir").sum())
-    c1, c2, c3, c4 = st.columns(4)
-    c1.markdown(kpi(n, "Cas analysés"), unsafe_allow_html=True)
-    c2.markdown(kpi(n_issue, "Avec un problème", "#B45309"), unsafe_allow_html=True)
-    c3.markdown(kpi(n_low, "Confiance faible", "#B91C1C"), unsafe_allow_html=True)
-    c4.markdown(kpi(n_ver, "Vérification à revoir", "#B91C1C"), unsafe_allow_html=True)
-    st.write("")
-    left, right = st.columns([1, 2])
-    with left:
-        st.subheader("Causes trouvées")
-        st.bar_chart(cases["Cause principale"].value_counts())
-    with right:
-        st.subheader("Liste de triage")
-        st.caption("Problèmes d'abord, puis confiance la plus faible : ce sont les cas à relire en priorité.")
-        for _, c in cases.iterrows():
-            col = CAUSE_COLOR.get(c["Cause principale"], "#9CA3AF")
-            reco = str(c["Recommandation"])
-            reco = reco if len(reco) <= 140 else reco[:137] + "..."
-            st.markdown(
-                f'<div class="case" style="border-left-color:{col}"><div class="t">{esc(c["Cas"])} '
-                f'{chip(c["Cause principale"], col)}</div>'
-                f'<div>Confiance : {esc(c["Confiance"])} &nbsp;·&nbsp; Vérification : {esc(c["Vérification"])}'
-                f'{"" if c["Autres causes"] == "-" else " &nbsp;·&nbsp; Autres : " + esc(c["Autres causes"])}</div>'
-                f'<div class="r">{esc(reco)}</div></div>', unsafe_allow_html=True)
-        with st.expander("Voir sous forme de tableau"):
-            st.dataframe(cases.drop(columns=["_issue", "_conf"]), hide_index=True)
+# ------------------------------------------------------------ ONGLET ANALYSE
+with tab_main:
+    c1, c2, c3 = st.columns([1.3, 2, 1.2], vertical_alignment="bottom")
+    mode = c1.radio("Type d'analyse", ["Un cas", "Tout le lot"], horizontal=True)
+    case = c2.selectbox("Cas à analyser", case_ids, index=None, placeholder="Choisissez un cas",
+                        disabled=(mode == "Tout le lot"))
+    can_run = (mode == "Tout le lot") or (case is not None)
+    go = c3.button("▶  Lancer l'analyse", type="primary", disabled=not can_run)
 
-# ---- 2. détail
-with tab2:
-    case = st.selectbox("Cas", cases["Cas"].tolist())
-    row = runs_df[runs_df["case_id"] == case].iloc[0]
-    rep = parse_report(row["raw"])
-    cause = row["predicted"]
-    conf = CONF_ICON.get(str(row["confidence"]).lower(), "n/d")
-    ccol = CAUSE_COLOR.get(cause, "#9CA3AF")
-    cflag = str(row["confidence"]).lower()
-    st.markdown(f'<h3 style="margin-bottom:4px">{esc(case)} &nbsp;{chip(cause, ccol)}'
-                f'{chip("confiance " + {"high": "haute", "medium": "moyenne", "low": "faible"}.get(cflag, "n/d"), CONF_COLOR.get(cflag, "#9CA3AF"))}</h3>',
-                unsafe_allow_html=True)
-    st.write(CAUSE_TEXT.get(cause, ""))
-    sec = parse_list(row["secondary"])
-    if sec:
-        st.markdown("Autres causes possibles : " + " ".join(chip(x, CAUSE_COLOR.get(x, "#9CA3AF")) for x in sec),
-                    unsafe_allow_html=True)
+    if go:
+        st.session_state["target"] = "__BATCH__" if mode == "Tout le lot" else case
+        st.session_state["played"] = False
+    target = st.session_state.get("target")
 
-    fc = tool_data(row["tool_outputs"], "get_forecasts")
-    fr = tool_data(row["tool_outputs"], "check_freshness")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown("**Prévisions**")
-        if fc:
-            st.bar_chart(pd.DataFrame({"Prévision": [fc["batch_forecast"], fc["realtime_forecast"]]},
-                                      index=["Batch", "Real-Time"]))
-            st.caption(f"Écart : {fc.get('difference')} unités ({fc.get('difference_pct')} %)")
-        else:
-            st.caption("Données non disponibles (sortie des outils absente ou tronquée).")
-    with col_b:
-        st.markdown("**Fraîcheur des données**")
-        if fr:
-            age = float(fr["batch_age_hours"])
-            st.metric("Âge du snapshot Batch", f"{age:.0f} h",
-                      delta=f"{age - STALE_HOURS:+.0f} h par rapport à la limite de {STALE_HOURS} h",
-                      delta_color="inverse")
-            st.metric("Âge du snapshot Real-Time", f"{float(fr['realtime_age_hours']):.1f} h")
-        else:
-            st.caption("Données non disponibles.")
-
-    if rep:
-        if rep.get("recommendation"):
-            st.markdown(f'<div class="reco"><b>Recommandation</b><br>{esc(rep["recommendation"])}</div>',
-                        unsafe_allow_html=True)
-        st.markdown("**Preuves et sources**")
-        for e in rep.get("evidence", []):
-            src = e.get("source") or "source non citée"
-            st.markdown(f'<div class="ev">{esc(e.get("claim"))}<div class="s">{esc(src)}</div></div>',
-                        unsafe_allow_html=True)
-        ver = rep.get("verification") or {}
-        with st.expander("Vérification par le code"):
-            if ver:
-                st.write("Réussie : " + ("oui" if ver.get("passed") else "non")
-                         + " · Révisée : " + ("oui" if ver.get("revised") else "non"))
-                for p in ver.get("problems", []):
-                    st.write("- " + str(p))
-                st.caption("Contrôle uniquement les sources citées et les nombres cités, "
-                           "pas la logique du raisonnement.")
-            else:
-                st.write("Aucune information de vérification.")
+    if target is None:
+        st.markdown('<div class="empty"><b>Aucune analyse lancée.</b><br>'
+                    "Choisissez un cas (ou tout le lot) puis cliquez sur « Lancer l'analyse ».</div>", unsafe_allow_html=True)
+        a, b, c = st.columns(3)
+        a.markdown('<div class="card"><h4>① Investigation</h4><p>Un agent interroge 5 outils en lecture seule : '
+                   'prévisions, variables, configurations, fraîcheur, logs.</p></div>', unsafe_allow_html=True)
+        b.markdown('<div class="card"><h4>② Connaissance</h4><p>Un agent retrouve les règles, définitions et incidents passés '
+                   'dans la documentation (RAG hybride).</p></div>', unsafe_allow_html=True)
+        c.markdown('<div class="card"><h4>③ Analyse et vérification</h4><p>Un agent conclut sur la cause racine, puis le code '
+                   'vérifie les sources et les nombres cités.</p></div>', unsafe_allow_html=True)
+    elif target != "__BATCH__" and target not in facts:
+        st.warning("Ce cas n'existe pas dans l'exécution sélectionnée.")
     else:
-        st.info("Le rapport détaillé est illisible ou tronqué ; seules la cause et la confiance sont affichées.")
-    st.caption("Outils appelés : " + (row["tools"] or "aucun").replace(",", ", "))
+        # ---------- animation (une seule fois par analyse)
+        if not st.session_state.get("played"):
+            f = facts[target] if target != "__BATCH__" else None
+            steps = []
+            if f:
+                steps.append(f"Agent 1 · Investigateur : {len(f['tools'])} outils appelés ({', '.join(f['tools'])})")
+                if f["fc"]:
+                    steps.append(f"Écart mesuré : {f['fc'].get('difference')} unités ({f['fc'].get('difference_pct')} %)")
+                if f["fr"]:
+                    steps.append(f"Fraîcheur : snapshot Batch de {f['fr']['batch_age_hours']} h, Real-Time de {f['fr']['realtime_age_hours']} h")
+                steps.append(f"Agent 2 · Connaissance : {len(f['docs'])} document(s) retrouvé(s) dans le RAG")
+                steps.append(f"Agent 3 · Analyste : cause retenue {f['cause']} (confiance {CONF_FR.get(f['conf'], 'n/d')})")
+                steps.append(f"Vérification par le code : {ver_label(f['rep'])}")
+            else:
+                steps = [f"Lecture de {len(facts)} analyses enregistrées", "Calcul des écarts et des âges de snapshots",
+                         "Regroupement par cause racine", "Préparation du rapport"]
+            with st.status("Analyse en cours...", expanded=True) as status:
+                for s in steps:
+                    st.write("• " + s)
+                    time.sleep(STEP_PAUSE)
+                status.update(label="Analyse terminée", state="complete", expanded=False)
+            st.session_state["played"] = True
+        st.caption("Les agents ont déjà tourné dans Databricks : cette page relit et met en forme leur analyse enregistrée.")
 
-# ---- 3. architecture
-with tab3:
+        # ---------- rapport d'un cas
+        if target != "__BATCH__":
+            f = facts[target]
+            rep, fc, fr = f["rep"], f["fc"], f["fr"]
+            col = CAUSE_COLOR.get(f["cause"], "#9CA3AF")
+            sec = " ".join(chip(x, CAUSE_COLOR.get(x, "#9CA3AF")) for x in f["secondary"])
+            st.markdown(
+                f'<div class="verdict" style="border-left-color:{col}"><h2>{esc(f["case"])} &nbsp;{chip(f["cause"], col)}'
+                f'{chip("confiance " + CONF_FR.get(f["conf"], "n/d"), CONF_COLOR.get(f["conf"], "#9CA3AF"))}'
+                f'{chip("vérification " + ver_label(rep), "#10B981" if ver_label(rep) == "réussie" else "#EF4444")}</h2>'
+                f'<p>{esc(CAUSE_TEXT.get(f["cause"], ""))}</p>'
+                f'{("<p>Autres causes possibles : " + sec + "</p>") if sec else ""}</div>', unsafe_allow_html=True)
+
+            k = st.columns(4)
+            k[0].markdown(kpi(f"{fc['difference']:+g}" if fc else "n/d", "Écart (unités)"), unsafe_allow_html=True)
+            k[1].markdown(kpi(f"{fc['difference_pct']} %" if fc else "n/d", "Écart relatif",
+                              "#B45309" if fc and abs(float(fc["difference_pct"])) > TOLERANCE_PCT else "#047857"), unsafe_allow_html=True)
+            k[2].markdown(kpi(f"{float(fr['batch_age_hours']):.0f} h" if fr else "n/d", "Âge du snapshot Batch",
+                              "#B91C1C" if fr and float(fr["batch_age_hours"]) > STALE_HOURS else "#047857"), unsafe_allow_html=True)
+            k[3].markdown(kpi(f"{float(fr['realtime_age_hours']):.1f} h" if fr else "n/d", "Âge du snapshot Real-Time"), unsafe_allow_html=True)
+            st.write("")
+
+            g1, g2 = st.columns(2)
+            with g1:
+                st.markdown("##### Prévisions Batch et Real-Time")
+                if fc:
+                    st.altair_chart(chart_forecasts(fc), width="stretch")
+                else:
+                    st.caption("Données non disponibles (sortie des outils absente ou tronquée).")
+            with g2:
+                st.markdown("##### Fraîcheur des données")
+                if fr:
+                    st.altair_chart(chart_freshness(fr), width="stretch")
+                    st.caption(f"Ligne rouge : limite documentée de {STALE_HOURS} h au-delà de laquelle un snapshot est obsolète.")
+                else:
+                    st.caption("Données non disponibles.")
+
+            st.markdown("##### Chaîne d'explication")
+            diffs = differing(f)
+            nodes = [f'<span class="node"><b>Cause</b><br>{esc(f["cause"])}</span>']
+            if fr and float(fr["batch_age_hours"]) > STALE_HOURS:
+                nodes.append(f'<span class="node"><b>Observé</b><br>snapshot Batch de {float(fr["batch_age_hours"]):.0f} h</span>')
+            for d in diffs[:3]:
+                nodes.append(f'<span class="node"><b>Observé</b><br>{esc(d)}</span>')
+            if not diffs and not (fr and float(fr["batch_age_hours"]) > STALE_HOURS):
+                nodes.append('<span class="node"><b>Observé</b><br>aucune différence d\'entrée</span>')
+            if fc:
+                nodes.append(f'<span class="node"><b>Effet</b><br>écart de {fc["difference"]:+g} unités ({fc["difference_pct"]} %)</span>')
+            st.markdown('<div class="chain">' + '<span class="arrow">→</span>'.join(nodes) + "</div>", unsafe_allow_html=True)
+
+            dt = diff_table(f)
+            if not dt.empty:
+                st.markdown("##### Ce qui diffère entre les deux pipelines")
+                st.dataframe(dt.style.apply(lambda r: ["background-color:#FEF3C7; color:#111827" if r["Différent"] == "oui" else ""] * len(r), axis=1),
+                             hide_index=True)
+            warn = (f["logs"].get("batch") or {}).get("warning_message")
+            if warn:
+                st.warning(f"Avertissement du pipeline Batch : {warn}")
+
+            if rep.get("recommendation"):
+                st.markdown(f'<div class="reco"><b>Recommandation</b><br>{esc(rep["recommendation"])}</div>', unsafe_allow_html=True)
+            if rep.get("evidence"):
+                st.markdown("##### Preuves et sources")
+                for e in rep["evidence"]:
+                    st.markdown(f'<div class="ev">{esc(e.get("claim"))}<div class="s">{esc(e.get("source") or "source non citée")}</div></div>',
+                                unsafe_allow_html=True)
+            with st.expander("Vérification par le code"):
+                ver = rep.get("verification") or {}
+                if ver:
+                    st.write("Réussie : " + ("oui" if ver.get("passed") else "non") + " · Révisée : " + ("oui" if ver.get("revised") else "non"))
+                    for p in ver.get("problems", []):
+                        st.write("- " + str(p))
+                    st.caption("Contrôle uniquement les sources citées et les nombres cités, pas la logique du raisonnement.")
+                else:
+                    st.write("Aucune information de vérification.")
+            if not rep:
+                st.info("Le rapport détaillé est illisible ou tronqué ; seules la cause et la confiance sont affichées.")
+            st.download_button("📄 Télécharger le rapport PDF", data=case_pdf(f, run_label),
+                               file_name=f"rapport_{f['case']}.pdf", mime="application/pdf", type="primary")
+
+        # ---------- analyse du lot
+        else:
+            rows = []
+            for cid in case_ids:
+                f = facts[cid]
+                fc, fr = f["fc"], f["fr"]
+                rows.append({"Cas": cid, "Cause": f["cause"], "Autres causes": ", ".join(f["secondary"]) or "-",
+                             "Confiance": CONF_FR.get(f["conf"], "n/d"), "Vérification": ver_label(f["rep"]),
+                             "Écart (%)": abs(float(fc["difference_pct"])) if fc else None,
+                             "Âge snapshot Batch (h)": float(fr["batch_age_hours"]) if fr else None,
+                             "Recommandation": f["rep"].get("recommendation") or "n/d"})
+            table = pd.DataFrame(rows)
+            n_issue = int((table["Cause"] != "NO_ISSUE").sum())
+            k = st.columns(4)
+            k[0].markdown(kpi(len(table), "Cas analysés"), unsafe_allow_html=True)
+            k[1].markdown(kpi(n_issue, "Avec un problème", "#B45309"), unsafe_allow_html=True)
+            k[2].markdown(kpi(int((table["Confiance"] == "faible").sum()), "Confiance faible", "#B91C1C"), unsafe_allow_html=True)
+            k[3].markdown(kpi(int((table["Vérification"] == "à revoir").sum()), "Vérification à revoir", "#B91C1C"), unsafe_allow_html=True)
+            st.write("")
+            g1, g2 = st.columns([1, 1.4])
+            with g1:
+                st.markdown("##### Causes trouvées")
+                st.altair_chart(chart_causes(table), width="stretch")
+            with g2:
+                st.markdown("##### Carte de décision : écart et fraîcheur")
+                pts = table.dropna(subset=["Écart (%)", "Âge snapshot Batch (h)"])
+                if pts.empty:
+                    st.caption("Données non disponibles.")
+                else:
+                    st.altair_chart(chart_map(pts), width="stretch")
+                    st.caption(f"Lignes pointillées : seuils des règles documentées ({TOLERANCE_PCT} % d'écart, {STALE_HOURS} h de snapshot). "
+                               "Un cas en haut à droite cumule un grand écart et des données anciennes.")
+            st.markdown("##### Cas à relire en priorité")
+            st.caption("Problèmes d'abord, puis confiance la plus faible.")
+            rank = {"faible": 0, "moyenne": 1, "haute": 2, "n/d": 1}
+            show = table.assign(_i=(table["Cause"] == "NO_ISSUE"), _c=table["Confiance"].map(rank)).sort_values(["_i", "_c"]).drop(columns=["_i", "_c"])
+            st.dataframe(show, hide_index=True)
+            st.download_button("📄 Télécharger le rapport du lot (PDF)", data=batch_pdf(show, run_label),
+                               file_name="rapport_lot.pdf", mime="application/pdf", type="primary")
+
+# ------------------------------------------------------------ ONGLET ARCHITECTURE
+with tab_arch:
     st.subheader("Trois agents, un rapport vérifié")
     st.graphviz_chart("""
     digraph G {
@@ -366,8 +668,8 @@ with tab3:
 - **Une seule révision**, signalée dans le rapport. Rien n'est caché.
 """)
 
-# ---- 4. évaluation
-with tab4:
+# ------------------------------------------------------------ ONGLET ÉVALUATION
+with tab_eval:
     st.subheader("Résultats mesurés")
     try:
         ev = load_eval()
@@ -377,11 +679,15 @@ with tab4:
             st.dataframe(ev.rename(columns={"config": "Système", "batch_id": "Exécution", "run": "Passe",
                                             "accuracy_pct": "Exactitude (%)", "llm_calls": "Appels LLM / cas",
                                             "seconds": "Secondes / cas"}), hide_index=True)
-            st.bar_chart(ev.assign(Exécution=ev["config"] + " · passe " + ev["run"].astype(str))
-                         .set_index("Exécution")["accuracy_pct"])
+            evp = ev.assign(Exécution=ev["config"] + " · passe " + ev["run"].astype(str))
+            st.altair_chart(alt.Chart(evp).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
+                x=alt.X("Exécution:N", axis=alt.Axis(labelAngle=-20, title=None)),
+                y=alt.Y("accuracy_pct:Q", title="Exactitude (%)", scale=alt.Scale(domain=[0, 100])),
+                color=alt.Color("config:N", legend=alt.Legend(title="Système"),
+                                scale=alt.Scale(domain=["3 agents", "Agent unique"], range=["#4F46E5", "#F59E0B"]))
+            ).properties(height=300), width="stretch")
     except Exception as e:  # droits manquants sur known_issues, par exemple
-        st.info(f"Évaluation indisponible : {type(e).__name__}. "
-                "Donnez à l'application le droit SELECT sur known_issues.")
+        st.info(f"Évaluation indisponible : {type(e).__name__}. Donnez à l'application le droit SELECT sur known_issues.")
     st.subheader("Limites")
     st.markdown("""
 - Données synthétiques et 12 cas : une seule erreur change le score de 8 points. Les écarts entre systèmes ne sont pas significatifs.
@@ -389,4 +695,5 @@ with tab4:
 - L'agent n'est pas parfaitement reproductible, même à température 0.
 - La vérification ne contrôle pas la logique du raisonnement.
 - Les 3 agents coûtent environ deux fois plus d'appels et de temps que l'agent unique.
+- Cette application relit des analyses enregistrées : elle ne relance pas les agents en direct.
 """)

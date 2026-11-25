@@ -1,4 +1,6 @@
-streamlit
+streamlit>=1.67
 pandas
+altair
+reportlab
 databricks-sdk
 databricks-sql-connector
