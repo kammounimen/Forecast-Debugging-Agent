@@ -40,39 +40,12 @@ CONF_COLOR = {"high": "#10B981", "medium": "#F59E0B", "low": "#EF4444"}
 
 st.set_page_config(page_title="Forecast Debugging Agent", page_icon="🔎", layout="wide")
 
-st.markdown("""
-<style>
-.block-container {padding-top: 1.4rem; max-width: 1250px;}
-.hero {background: linear-gradient(120deg, #1E1B4B 0%, #4F46E5 60%, #06B6D4 100%); color: #fff;
-       padding: 26px 32px; border-radius: 18px; margin-bottom: 12px;}
-.hero h1 {margin: 0; font-size: 2rem; color: #fff !important;}
-.hero p {margin: 6px 0 0 0; font-size: 1.02rem; color: #fff; opacity: .93;}
-.notice {background: #FFF7E6; border: 1px solid #FCD9A0; color: #7A4B00 !important; border-radius: 10px;
-         padding: 8px 14px; font-size: .86rem; margin-bottom: 12px;}
-.card {background: #fff; color: #111827; border: 1px solid #E5E7EB; border-radius: 14px; padding: 16px 18px;
-       box-shadow: 0 1px 3px rgba(17,24,39,.06); height: 100%;}
-.card h4 {margin: 0 0 6px 0; color: #111827; font-size: 1rem;}
-.card p {margin: 0; color: #4B5563; font-size: .9rem;}
-.kpi {background: #fff; color: #111827; border-radius: 14px; padding: 14px 18px; border: 1px solid #E5E7EB;
-      box-shadow: 0 1px 3px rgba(17,24,39,.06);}
-.kpi .v {font-size: 1.9rem; font-weight: 700; line-height: 1.1;}
-.kpi .l {color: #6B7280; font-size: .82rem; margin-top: 2px;}
-.chip {display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: .78rem; font-weight: 600;
-       color: #fff !important; margin-right: 6px;}
-.verdict {background: #fff; color: #111827; border: 1px solid #E5E7EB; border-left: 8px solid #9CA3AF;
-          border-radius: 14px; padding: 16px 20px; margin: 6px 0 14px 0; box-shadow: 0 1px 3px rgba(17,24,39,.06);}
-.verdict h2 {margin: 0 0 6px 0; color: #111827; font-size: 1.5rem;}
-.verdict p {margin: 4px 0 0 0; color: #374151;}
-.ev {background: #fff; color: #111827; border: 1px solid #E5E7EB; border-radius: 10px; padding: 10px 14px; margin-bottom: 8px;}
-.ev .s {color: #6B7280; font-size: .78rem; font-family: monospace; margin-top: 2px;}
-.reco {background: #ECFDF5; border: 1px solid #A7F3D0; color: #065F46; border-radius: 12px; padding: 12px 16px; margin: 8px 0;}
-.chain {display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 12px 0;}
-.node {background: #EEF2FF; color: #1E1B4B; border: 1px solid #C7D2FE; border-radius: 10px; padding: 8px 12px; font-size: .88rem;}
-.arrow {color: #6B7280; font-size: 1.2rem;}
-.empty {text-align: center; color: #6B7280; padding: 18px 0 6px 0;}
-</style>
-""", unsafe_allow_html=True)
-
+import theme
+theme.inject()
+st.markdown("""<style>
+.hero {background: #111C34 !important; background-image: none !important;
+       border-bottom: 3px solid #4F46E5; border-radius: 14px;}
+</style>""", unsafe_allow_html=True)
 
 def esc(x):
     return html.escape(str(x if x is not None else ""))
@@ -216,17 +189,39 @@ def parse_list(s):
         return []
 
 
-def tool_all(tool_outputs, name):
-    out = []
+def load_pairs(tool_outputs):
+    """Paires [outil, sortie]. La table coupe le JSON à 12 000 caractères : on récupère les paires complètes du début."""
+    s = str(tool_outputs or "").strip()
     try:
-        for item in json.loads(tool_outputs):
-            if isinstance(item, list) and len(item) == 2 and item[0] == name:
-                try:
-                    out.append(json.loads(item[1]))
-                except Exception:
-                    pass
+        v = json.loads(s)
+        return [x for x in v if isinstance(x, list) and len(x) == 2]
     except Exception:
         pass
+    dec, pairs, i = json.JSONDecoder(), [], s.find("[") + 1
+    if i == 0:
+        return []
+    while i < len(s):
+        while i < len(s) and s[i] in " ,\n\r\t":
+            i += 1
+        if i >= len(s) or s[i] != "[":
+            break
+        try:
+            obj, i = dec.raw_decode(s, i)
+        except Exception:
+            break
+        if isinstance(obj, list) and len(obj) == 2:
+            pairs.append(obj)
+    return pairs
+
+
+def tool_all(tool_outputs, name):
+    out = []
+    for item in load_pairs(tool_outputs):
+        if item[0] == name:
+            try:
+                out.append(json.loads(item[1]))
+            except Exception:
+                pass
     return out
 
 
@@ -234,22 +229,29 @@ def tool_data(tool_outputs, name):
     found = tool_all(tool_outputs, name)
     return found[0] if found else None
 
-
+DATA_TOOLS = ("get_forecasts", "compare_features", "compare_configs", "check_freshness", "get_pipeline_logs")
 def case_facts(row):
     to = row["tool_outputs"]
+    rep0 = parse_report(row["raw"]) or {}
     docs = []
     for item in tool_all(to, "search_knowledge"):
         for r in (item or {}).get("results", []):
             if r.get("doc_id") and r["doc_id"] not in docs:
                 docs.append(r["doc_id"])
-    return {
+    for e in rep0.get("evidence", []) or []:
+        src = str(e.get("source") or "")
+        if src.startswith("doc:") and src[4:] not in docs:
+            docs.append(src[4:])
+    present = {name for name, _ in load_pairs(to)}
+    return {"missing_tools": [t for t in ("get_forecasts", "compare_features", "compare_configs", "check_freshness",
+                                          "get_pipeline_logs") if t not in present],
         "case": row["case_id"], "cause": row["predicted"], "conf": str(row["confidence"]).lower(),
         "secondary": parse_list(row["secondary"]), "rep": parse_report(row["raw"]) or {},
         "fc": tool_data(to, "get_forecasts"), "fr": tool_data(to, "check_freshness"),
         "feats": (tool_data(to, "compare_features") or {}).get("features", []),
         "cfgs": (tool_data(to, "compare_configs") or {}).get("configs", []),
         "logs": tool_data(to, "get_pipeline_logs") or {}, "docs": docs,
-        "tools": [t for t in str(row["tools"] or "").split(",") if t],
+        "tools": list(dict.fromkeys(t for t in str(row["tools"] or "").split(",") if t in DATA_TOOLS)),
     }
 
 
@@ -323,10 +325,68 @@ def chart_map(points):
     ry = alt.Chart(pd.DataFrame({"y": [STALE_HOURS]})).mark_rule(color="#9CA3AF", strokeDash=[6, 4]).encode(y="y:Q")
     return (sc + rx + ry).properties(height=340)
 
+def pipeline_dot(f=None, upto=4):
+    """Schéma du pipeline. upto : dernière étape allumée (0 = question, 1 = agents 1 et 2, 2 = analyste, 3 = vérification, 4 = rapport)."""
+    rep = (f or {}).get("rep") or {}
+    ver = rep.get("verification") or {}
+    revised = bool(ver.get("revised"))
+    on = lambda step: step <= upto
 
+    def node(nid, label, step, fill="#EEF2FF", border="#4F46E5"):
+        if not on(step):
+            fill, border = "#F3F4F6", "#D1D5DB"
+        font = "#111827" if on(step) else "#9CA3AF"
+        return f'{nid} [label="{label}", fillcolor="{fill}", color="{border}", fontcolor="{font}"];'
+
+    if f:
+        fc = f["fc"]
+        q = f["case"] + (f"\\nÉcart {fc['difference']:+g} unités ({fc['difference_pct']} %)" if fc else "")
+        miss = [t for t in DATA_TOOLS if t not in f["tools"]]
+        a1 = f"Agent 1 · Investigateur\\n{len(f['tools'])}/5 outils" + (f"\\nmanquant : {', '.join(miss)}" if miss else "")
+        a2 = f"Agent 2 · Connaissance\\n{len(f['docs'])} document(s) retrouvé(s)"
+        a3 = f"Agent 3 · Analyste\\n{f['cause']}\\nconfiance {CONF_FR.get(f['conf'], 'n/d')}"
+        v = f"Vérification par le code\\n{ver_label(rep)}" + ("\\n1 révision" if revised else "")
+        r = f"Rapport\\n{len(rep.get('evidence') or [])} preuve(s)\\nrecommandation : {'oui' if rep.get('recommendation') else 'non'}"
+        a1_style = ("#FEF3C7", "#F59E0B") if miss else ("#EEF2FF", "#4F46E5")
+        v_style = ("#FEE2E2", "#EF4444") if ver_label(rep) == "à revoir" else ("#D1FAE5", "#10B981")
+    else:
+        q, a1 = "Écart Batch ≠ Real-Time\\n(un case_id)", "Agent 1 · Investigateur\\n5 outils en lecture seule"
+        a2, a3 = "Agent 2 · Connaissance\\nRAG hybride BM25 + embeddings", "Agent 3 · Analyste\\ncause racine + rapport"
+        v, r = "Vérification par le code\\nsources et nombres", "Rapport\\ncause · preuves · confiance\\nrecommandation"
+        a1_style, v_style = ("#EEF2FF", "#4F46E5"), ("#D1FAE5", "#10B981")
+
+    edge = lambda a, b, step, label="": (f'{a} -> {b} [color="{"#4F46E5" if on(step) else "#D1D5DB"}"'
+                                          + (f', label="{label}", fontcolor="{"#374151" if on(step) else "#9CA3AF"}"' if label else "") + "];")
+    return f"""
+    digraph G {{
+      rankdir=LR; nodesep=0.45; ranksep=0.8; splines=true;
+      node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, margin="0.2,0.12", width=2.3];
+      edge [fontname="Helvetica", fontsize=10, penwidth=1.6];
+      {{rank=same; A1; A2;}}
+      {node("Q", q, 0, "#FEF3C7", "#F59E0B")}
+      {node("A1", a1, 1, *a1_style)}
+      {node("A2", a2, 1)}
+      {node("A3", a3, 2)}
+      {node("V", v, 3, *v_style)}
+      {node("R", r, 4, "#FEF3C7", "#F59E0B")}
+      {edge("Q", "A1", 1)}
+      {edge("Q", "A2", 1)}
+      {edge("A1", "A3", 2, "faits")}
+      {edge("A2", "A3", 2, "règles")}
+      {edge("A3", "V", 3)}
+      V -> A3 [constraint=false, style={"solid" if revised else "dashed"}, color="{"#EF4444" if (revised and on(3)) else "#D1D5DB"}", label="révision", fontcolor="{"#EF4444" if (revised and on(3)) else "#9CA3AF"}"];
+      {edge("V", "R", 4)}
+    }}"""
 # ---------------------------------------------------------------- PDF
+_PDF_MAP = {"\u2011": "-", "\u2010": "-", "\u2012": "-", "\u2212": "-", "\u202f": " ", "\u00a0": " ", "\u2009": " ",
+            "\u200b": "", "\u2192": "->", "\u2265": ">=", "\u2264": "<=", "\u2248": "~", "\u2260": "!=", "\u2022": "-"}
+
+
 def _pdf_text(s):
-    return xml_escape(str(s if s is not None else "")).encode("cp1252", "replace").decode("cp1252")
+    s = str(s if s is not None else "")
+    for k, v in _PDF_MAP.items():
+        s = s.replace(k, v)
+    return xml_escape(s).encode("cp1252", "replace").decode("cp1252")
 
 
 def _pdf_base(title, subtitle):
@@ -367,6 +427,13 @@ DISCLAIMER = ("Prototype non commercial. Donnees synthetiques. L'analyse est pro
               "inexacte : verifiez la confiance et la verification avant d'agir. La verification par le code controle "
               "les sources et les nombres cites, pas la logique du raisonnement.")
 
+def _pdf_footer(canvas, doc):
+    canvas.saveState()
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColorRGB(0.42, 0.45, 0.50)
+    canvas.drawString(51, 28, "Forecast Debugging Agent - prototype, donnees synthetiques")
+    canvas.drawRightString(544, 28, f"Page {doc.page}")
+    canvas.restoreState()
 
 def case_pdf(f, run_label):
     from reportlab.lib.units import cm
@@ -406,9 +473,13 @@ def case_pdf(f, run_label):
         for e in rep["evidence"]:
             story += [P(f"- {e.get('claim')}"), P(f"  source : {e.get('source') or 'non citee'}", "small")]
     if rep.get("recommendation"):
-        story += [P("Recommandation", "h2"), P(rep["recommendation"])]
+        intro, steps = theme.split_reco(rep["recommendation"])
+        story += [P("Recommandation", "h2")]
+        if intro:
+            story.append(P(intro))
+        story += [P(f"{i}. {t}") for i, t in enumerate(steps, 1)]
     story += [Spacer(1, 14), P(DISCLAIMER, "small")]
-    doc.build(story)
+    doc.build(story, onFirstPage=_pdf_footer, onLaterPages=_pdf_footer)
     return buf.getvalue()
 
 
@@ -425,25 +496,31 @@ def batch_pdf(table, run_label):
     story.append(_pdf_table([[P("Cause", "cell"), P("Cas", "cell")]] + [[P(c, "cell"), P(int(v), "cell")] for c, v in counts.items()],
                             [8 * cm, 3 * cm]))
     story += [P("Detail par cas", "h2")]
-    data = [[P(h) for h in ["Cas", "Cause", "Conf.", "Verif.", "Ecart %", "Age Batch h", "Recommandation"]]]
+    data = [[P(h) for h in ["Cas", "Cause", "Conf.", "Verif.", "Ecart %", "Age Batch h"]]]
     for _, r in table.iterrows():
-        reco = str(r["Recommandation"])
-        data.append([P(r["Cas"]), P(r["Cause"]), P(r["Confiance"]), P(r["Vérification"]), P(r["Écart (%)"]),
-                     P(r["Âge snapshot Batch (h)"]), P(reco if len(reco) < 90 else reco[:87] + "...")])
-    story.append(_pdf_table(data, [1.9 * cm, 3.4 * cm, 1.5 * cm, 1.6 * cm, 1.5 * cm, 1.7 * cm, 5.6 * cm]))
+        data.append([P(r["Cas"]), P(r["Cause"]), P(r["Confiance"]), P(r["Vérification"]),
+                     P(r["Écart (%)"]), P(r["Âge snapshot Batch (h)"])])
+    story.append(_pdf_table(data, [2.4 * cm, 5.2 * cm, 1.8 * cm, 2.0 * cm, 1.9 * cm, 2.4 * cm]))
+    story += [P("Recommandations", "h2")]
+    for _, r in table.iterrows():
+        intro, steps = theme.split_reco(r["Recommandation"])
+        story.append(P(f"{r['Cas']} - {r['Cause']}", "body"))
+        if intro:
+            story.append(P(intro))
+        story += [P(f"{i}. {t}") for i, t in enumerate(steps, 1)]
+        story.append(Spacer(1, 6))
     story += [Spacer(1, 14), P(DISCLAIMER, "small")]
-    doc.build(story)
+    doc.build(story, onFirstPage=_pdf_footer, onLaterPages=_pdf_footer)
     return buf.getvalue()
 
 
 # ---------------------------------------------------------------- interface
-st.markdown(
-    '<div class="hero"><h1>🔎 Forecast Debugging Agent</h1>'
-    "<p>Pourquoi une prévision Batch et une prévision Real-Time diffèrent-elles ? "
-    "Trois agents enquêtent, citent leurs preuves et proposent une action.</p></div>"
-    '<div class="notice">Prototype non commercial · données <b>synthétiques</b> · '
-    "l'agent peut se tromper : vérifiez la confiance et la vérification avant d'agir.</div>",
-    unsafe_allow_html=True)
+st.markdown(theme.hero("Forecast Debugging Agent",
+    "Pourquoi une prévision Batch et une prévision Real-Time diffèrent-elles ? "
+    "Trois agents enquêtent, citent leurs preuves et proposent une action."), unsafe_allow_html=True)
+st.markdown('<div class="notice">Prototype non commercial · données <b>synthétiques</b> · '
+            "l'agent peut se tromper : vérifiez la confiance et la vérification avant d'agir.</div>",
+            unsafe_allow_html=True)
 if DEMO:
     st.info("Mode démonstration : les cas affichés sont **fictifs**. Ajoutez la ressource SQL warehouse "
             "(clé `sql-warehouse`) dans les paramètres de l'application pour lire vos résultats réels.")
@@ -539,14 +616,19 @@ with tab_main:
                 f'<p>{esc(CAUSE_TEXT.get(f["cause"], ""))}</p>'
                 f'{("<p>Autres causes possibles : " + sec + "</p>") if sec else ""}</div>', unsafe_allow_html=True)
 
-            k = st.columns(4)
-            k[0].markdown(kpi(f"{fc['difference']:+g}" if fc else "n/d", "Écart (unités)"), unsafe_allow_html=True)
-            k[1].markdown(kpi(f"{fc['difference_pct']} %" if fc else "n/d", "Écart relatif",
-                              "#B45309" if fc and abs(float(fc["difference_pct"])) > TOLERANCE_PCT else "#047857"), unsafe_allow_html=True)
-            k[2].markdown(kpi(f"{float(fr['batch_age_hours']):.0f} h" if fr else "n/d", "Âge du snapshot Batch",
-                              "#B91C1C" if fr and float(fr["batch_age_hours"]) > STALE_HOURS else "#047857"), unsafe_allow_html=True)
-            k[3].markdown(kpi(f"{float(fr['realtime_age_hours']):.1f} h" if fr else "n/d", "Âge du snapshot Real-Time"), unsafe_allow_html=True)
+            if f["missing_tools"]:
+                st.caption("Sorties d'outils absentes de la table (la table garde au plus 12 000 caractères) : "
+                           + ", ".join(f["missing_tools"]) + ". Les panneaux concernés sont masqués ; la cause, les preuves "
+                           "et la recommandation restent affichées.")
+            
             st.write("")
+            b_html, r_html, m_html = theme.compare_panel(f, STALE_HOURS, TOLERANCE_PCT)
+            cb, cr = st.columns(2)
+            cb.markdown(b_html, unsafe_allow_html=True)
+            cr.markdown(r_html, unsafe_allow_html=True)
+            st.markdown(m_html, unsafe_allow_html=True)
+            with st.expander("Déroulé de l'enquête", expanded=True):
+                st.markdown(theme.trace_html(f, CONF_FR.get(f["conf"], "n/d"), ver_label(rep)), unsafe_allow_html=True)
 
             g1, g2 = st.columns(2)
             with g1:
@@ -565,13 +647,16 @@ with tab_main:
 
             st.markdown("##### Chaîne d'explication")
             diffs = differing(f)
+            have_inputs = bool(f["feats"] or f["cfgs"])
             nodes = [f'<span class="node"><b>Cause</b><br>{esc(f["cause"])}</span>']
             if fr and float(fr["batch_age_hours"]) > STALE_HOURS:
                 nodes.append(f'<span class="node"><b>Observé</b><br>snapshot Batch de {float(fr["batch_age_hours"]):.0f} h</span>')
             for d in diffs[:3]:
                 nodes.append(f'<span class="node"><b>Observé</b><br>{esc(d)}</span>')
-            if not diffs and not (fr and float(fr["batch_age_hours"]) > STALE_HOURS):
+            if have_inputs and not diffs and not (fr and float(fr["batch_age_hours"]) > STALE_HOURS):
                 nodes.append('<span class="node"><b>Observé</b><br>aucune différence d\'entrée</span>')
+            if not have_inputs and not fr:
+                nodes.append('<span class="node"><b>Observé</b><br>faits détaillés non disponibles : voir les preuves</span>')
             if fc:
                 nodes.append(f'<span class="node"><b>Effet</b><br>écart de {fc["difference"]:+g} unités ({fc["difference_pct"]} %)</span>')
             st.markdown('<div class="chain">' + '<span class="arrow">→</span>'.join(nodes) + "</div>", unsafe_allow_html=True)
@@ -586,12 +671,11 @@ with tab_main:
                 st.warning(f"Avertissement du pipeline Batch : {warn}")
 
             if rep.get("recommendation"):
-                st.markdown(f'<div class="reco"><b>Recommandation</b><br>{esc(rep["recommendation"])}</div>', unsafe_allow_html=True)
+                st.markdown(theme.reco_html(rep["recommendation"]), unsafe_allow_html=True)
             if rep.get("evidence"):
                 st.markdown("##### Preuves et sources")
-                for e in rep["evidence"]:
-                    st.markdown(f'<div class="ev">{esc(e.get("claim"))}<div class="s">{esc(e.get("source") or "source non citée")}</div></div>',
-                                unsafe_allow_html=True)
+                for ev in rep["evidence"]:
+                    st.markdown(theme.evidence_html(ev), unsafe_allow_html=True)
             with st.expander("Vérification par le code"):
                 ver = rep.get("verification") or {}
                 if ver:
@@ -649,18 +733,21 @@ with tab_main:
 # ------------------------------------------------------------ ONGLET ARCHITECTURE
 with tab_arch:
     st.subheader("Trois agents, un rapport vérifié")
-    st.graphviz_chart("""
-    digraph G {
-      rankdir=LR; node [shape=box, style="rounded,filled", fillcolor="#EEF2FF", color="#4F46E5", fontname="Helvetica"];
-      Q [label="Écart Batch ≠ Real-Time\\n(un case_id)", fillcolor="#FEF3C7", color="#F59E0B"];
-      A1 [label="Agent 1 · Investigateur\\n5 outils en lecture seule"];
-      A2 [label="Agent 2 · Connaissance\\nRAG hybride BM25 + embeddings"];
-      A3 [label="Agent 3 · Analyste\\ncause racine + rapport"];
-      V  [label="Vérification par le code\\nsources et nombres", fillcolor="#D1FAE5", color="#10B981"];
-      R  [label="Rapport\\ncause · preuves · confiance\\nrecommandation", fillcolor="#FEF3C7", color="#F59E0B"];
-      Q -> A1; Q -> A2; A1 -> A3 [label="faits"]; A2 -> A3 [label="règles"];
-      A3 -> V; V -> A3 [label="1 révision", style=dashed]; V -> R;
-    }""")
+    ca, cb = st.columns([2, 1], vertical_alignment="bottom")
+    prev = st.session_state.get("target")
+    pick = ca.selectbox("Parcours d'un cas", case_ids, index=case_ids.index(prev) if prev in case_ids else None,
+                        placeholder="Choisissez un cas pour voir son parcours réel")
+    replay = cb.button("▶  Rejouer le parcours", disabled=pick is None)
+    f_arch = facts.get(pick) if pick else None
+    holder = st.empty()
+    if f_arch and replay:
+        for step in range(0, 5):
+            holder.graphviz_chart(pipeline_dot(f_arch, step))
+            time.sleep(0.7)
+    holder.graphviz_chart(pipeline_dot(f_arch, 4))
+    st.caption("Parcours reconstitué depuis l'analyse enregistrée : les agents ne sont pas relancés. "
+               "Un outil manquant apparaît en orange, une vérification à revoir en rouge."
+               if f_arch else "Choisissez un cas pour afficher ses valeurs réelles. Sans cas, le schéma montre l'architecture générale.")
     st.markdown("""
 - **Les outils donnent des faits, jamais un verdict.** Les règles (24 h, 5 %) viennent des documents, retrouvés par le RAG.
 - **Lecture seule.** Liste blanche de tables : la vérité terrain n'est pas accessible aux agents.
@@ -673,6 +760,8 @@ with tab_eval:
     st.subheader("Résultats mesurés")
     try:
         ev = load_eval()
+        for c in ("accuracy_pct", "llm_calls", "seconds"):
+            ev[c] = pd.to_numeric(ev[c], errors="coerce").astype(float)
         if ev.empty:
             st.info("Aucun résultat à comparer avec la vérité terrain.")
         else:
@@ -680,12 +769,14 @@ with tab_eval:
                                             "accuracy_pct": "Exactitude (%)", "llm_calls": "Appels LLM / cas",
                                             "seconds": "Secondes / cas"}), hide_index=True)
             evp = ev.assign(Exécution=ev["config"] + " · passe " + ev["run"].astype(str))
-            st.altair_chart(alt.Chart(evp).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
-                x=alt.X("Exécution:N", axis=alt.Axis(labelAngle=-20, title=None)),
-                y=alt.Y("accuracy_pct:Q", title="Exactitude (%)", scale=alt.Scale(domain=[0, 100])),
+            base = alt.Chart(evp).encode(
+                x=alt.X("Exécution:N", sort=None, axis=alt.Axis(labelAngle=-20, labelLimit=300, title=None)),
+                y=alt.Y("accuracy_pct:Q", title="Exactitude (%)", scale=alt.Scale(domain=[0, 105])),
                 color=alt.Color("config:N", legend=alt.Legend(title="Système"),
-                                scale=alt.Scale(domain=["3 agents", "Agent unique"], range=["#4F46E5", "#F59E0B"]))
-            ).properties(height=300), width="stretch")
+                                scale=alt.Scale(domain=["3 agents", "Agent unique"], range=["#4F46E5", "#F59E0B"])))
+            chart = base.mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6) + \
+                    base.mark_text(dy=-8, fontWeight="bold").encode(text=alt.Text("accuracy_pct:Q", format=".1f"))
+            st.altair_chart(chart.properties(height=300), width="stretch")
     except Exception as e:  # droits manquants sur known_issues, par exemple
         st.info(f"Évaluation indisponible : {type(e).__name__}. Donnez à l'application le droit SELECT sur known_issues.")
     st.subheader("Limites")
