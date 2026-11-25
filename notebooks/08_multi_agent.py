@@ -60,10 +60,10 @@ from datetime import datetime, timezone
 MODEL = "databricks-gpt-oss-120b"     # même modèle que l'agent unique
 USE_RAG = True                         # False : l'Agent 2 est désactivé
 PARALLEL = True                        # False : Agents 1 puis 2 en séquence (si le parallèle pose problème)
-N_RUNS = 1
+N_RUNS = 1                             # mettez 3 pour avoir 3 passes (environ 12 minutes)
 MAX_STEPS = 10
 MAX_TOKENS = 4000
-PROMPT_VERSION = "ma_v1"
+PROMPT_VERSION = "ma_v2"
 CASES = [f"CASE_{i:03d}" for i in range(1, 13)]
 CAUSES = ["DATA_MISMATCH", "FEATURE_MISMATCH", "CONFIG_MISMATCH",
           "MODEL_VERSION_MISMATCH", "STALE_DATA", "NO_ISSUE"]
@@ -186,6 +186,7 @@ Tu n'as pas d'outil. Tu dois :
 5. Choisir UNE cause principale ; les autres causes éventuelles vont dans secondary_causes.
 6. Donner une recommandation concrète, reprise du runbook ou d'incidents similaires si ils sont fournis.
 7. Citer pour chaque preuve sa source exacte : "tool:<nom_outil>" ou "doc:<doc_id>", telles qu'elles figurent dans les entrées.
+8. Rédige les claim et la recommandation en français. Les sources (tool:..., doc:...), les noms de causes et les nombres restent inchangés. Écris les nombres sans séparateur de milliers (1200, pas 1 200).
 
 Causes possibles : DATA_MISMATCH, FEATURE_MISMATCH, CONFIG_MISMATCH, MODEL_VERSION_MISMATCH, STALE_DATA, NO_ISSUE.
 
@@ -437,6 +438,30 @@ def predicted_set(rep):
     return set() if not rep else {rep["primary_cause"], *rep.get("secondary_causes", [])}
 
 
+def _slim(rep):
+    """Rapport sans la liste des sources autorisées (longue, inutile dans la table)."""
+    if not rep:
+        return None
+    d = dict(rep)
+    v = dict(d.get("verification", {}))
+    v.pop("sources_allowed", None)
+    d["verification"] = v
+    return d
+
+
+def _outs(r):
+    """Sorties d'outils : données de l'Agent 1 en entier, Agent 2 réduit à la liste des documents retrouvés."""
+    out = [[n, c] for n, c in (r["inv"] or {}).get("tool_outputs", [])]
+    for n, c in (r["kn"] or {}).get("tool_outputs", []):
+        try:
+            res = json.loads(c).get("results", [])
+            c = json.dumps({"results": [{"doc_id": x.get("doc_id"), "section": x.get("section")} for x in res]})
+        except Exception:
+            c = ""
+        out.append([n, c])
+    return json.dumps(out, ensure_ascii=False)
+
+
 config = f"multi{'_rag' if USE_RAG else '_norag'}_{PROMPT_VERSION}_{MODEL}"
 by_run, rows = defaultdict(list), []
 tp = fp = fn = 0
@@ -456,8 +481,8 @@ for r in results:
     rows.append((BATCH_ID, config, r["run"], cid, pred, json.dumps((rep or {}).get("secondary_causes", [])),
                  str((rep or {}).get("confidence")), len(r["tools"]), ",".join(r["tools"]), r["n_llm"],
                  float(r["seconds"]), bool(r["repaired"]), bool(good),
-                 json.dumps(rep, ensure_ascii=False)[:4000] if rep else (r["raw"] or "")[:2000],
-                 "", json.dumps(r["tool_outputs"], ensure_ascii=False)[:12000],
+                 json.dumps(_slim(rep), ensure_ascii=False)[:8000] if rep else (r["raw"] or "")[:2000],
+                 "", _outs(r),
                  datetime.now(timezone.utc).isoformat()))
 
 accs = [sum(v) / len(v) for v in by_run.values()]
