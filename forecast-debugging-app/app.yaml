@@ -1,0 +1,14 @@
+command:
+  - 'streamlit'
+  - 'run'
+  - 'app.py'
+  - '--theme.base=light'
+  - '--theme.primaryColor=#4F46E5'
+  - '--theme.backgroundColor=#F6F7FB'
+  - '--theme.secondaryBackgroundColor=#FFFFFF'
+  - '--theme.textColor=#111827'
+env:
+  - name: 'DATABRICKS_WAREHOUSE_ID'
+    valueFrom: 'sql-warehouse'
+  - name: 'STREAMLIT_GATHER_USAGE_STATS'
+    value: 'false'
